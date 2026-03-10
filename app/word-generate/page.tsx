@@ -3,15 +3,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Editor } from "@tinymce/tinymce-react";
 
-import { supabase } from "../../../lib/supabase";
+import { supabase } from "../../lib/supabaseClient";
 import {
   generateProjectDOCX,
   generateProjectDOCXByReportIds,
   generateProjectGPX,
   generateProjectGPXByReportIds,
-} from "../../../lib/download";
+} from "../../lib/download";
 
 type VehicleMovement = "green" | "yellow" | "red" | "";
 type VMFilter = "all" | "green" | "yellow" | "red" | "unset";
@@ -30,38 +29,18 @@ type ProjectRow = {
 type ReportRow = {
   id: string;
   project_id: string;
-  route_id?: string | null;
   category?: string | null;
   description?: string | null;
   created_at: string;
   difficulty?: VehicleMovement | null; // ✅ DB column
-  sort_order?: number | null; // ✅ NEW (for inserting at exact position)
 };
 
 type WatermarkOpts = { enabled: boolean; text: string };
-
-type ManualPointRow = {
-  report_id: string;
-  seq: number;
-  latitude: number;
-  longitude: number;
-  elevation?: number | null;
-  accuracy?: number | null;
-  timestamp?: string | null;
-};
 type PreparedFile = { fileName: string; blob: Blob };
 
 // ========= ROUTE SURVEY TYPES =========
 type PresetMap = { id: string; label: string; src: string };
 type PickMode = "preset" | "upload";
-
-// ========= LOCATIONS TABLE ROW (OPTIONAL) =========
-type RouteLocationRow = {
-  id: string;
-  label?: string | null;
-  pin_type?: string | null;
-  sort_order?: number | null;
-};
 
 function projectNameOf(p: ProjectRow | null) {
   return p?.name || p?.title || p?.project_name || "Project";
@@ -102,62 +81,6 @@ async function updateReportVM(reportId: string, next: VehicleMovement) {
   const payload: any = { difficulty: next ? next : null };
   const { error } = await supabase.from("reports").update(payload).eq("id", reportId);
   if (error) throw error;
-}
-
-
-async function uploadToBucket(bucket: string, path: string, file: File) {
-  const { data, error } = await supabase.storage.from(bucket).upload(path, file, {
-    cacheControl: "3600",
-    upsert: true,
-    contentType: file.type || undefined,
-  });
-  if (error) throw error;
-  const { data: pub } = supabase.storage.from(bucket).getPublicUrl(data.path);
-  return { path: data.path, publicUrl: pub.publicUrl };
-}
-
-async function uploadReportPhotos(projectId: string, reportId: string, files: File[]) {
-  if (!files.length) return;
-
-  // helper to read width/height
-  async function getImageSize(file: File): Promise<{ width: number; height: number } | null> {
-    try {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      const p = new Promise<{ width: number; height: number }>((resolve, reject) => {
-        img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-        img.onerror = reject;
-      });
-      img.src = url;
-      const size = await p;
-      URL.revokeObjectURL(url);
-      return size;
-    } catch {
-      return null;
-    }
-  }
-
-  // Upload in parallel (faster) then insert DB rows once
-  const uploads = await Promise.all(
-    files.map(async (f) => {
-      const safeName = f.name.replace(/[^\w.\-]+/g, "_");
-      const ext = f.name.split(".").pop() || "jpg";
-      const storagePath = `reports/${projectId}/${reportId}/${Date.now()}_${safeName}.${ext}`;
-
-      const size = await getImageSize(f);
-      const uploaded = await uploadToBucket(REPORT_PHOTO_BUCKET, storagePath, f);
-
-      return {
-        report_id: reportId,
-        url: uploaded.publicUrl,
-        width: size?.width ?? null,
-        height: size?.height ?? null,
-      };
-    })
-  );
-
-  const { error: imgErr } = await supabase.from(REPORT_IMAGE_TABLE).insert(uploads as any);
-  if (imgErr) throw imgErr;
 }
 
 function vmFilterLabel(f: VMFilter) {
@@ -235,54 +158,13 @@ function parseStageRanges(input: string, total: number) {
   return out;
 }
 
-// ✅ fixed preview heights (ONLY sizing change; UI remains same)
-const MAP_PREVIEW_HEIGHT = 320;
-const GA_PREVIEW_HEIGHT = 220;
-
-// ✅ spacing used for sort_order
-const SORT_STEP = 10;
-// ✅ if gap becomes too small, we renumber everything to 10,20,30...
-const MIN_GAP = 1;
-
-
-// ✅ Category options for new report creation (dropdown + custom)
-const CATEGORY_OPTIONS = [
-  "Footpath Bridge",
-  "Low Tension Cable",
-  "High Tension Cable",
-  "Towerline Cable",
-  "Take Diversion",
-  "Towerline",
-  "Underpass Bridge",
-  "Tree Branches",
-  "Bridge",
-  "Petrol bunk",
-  "Signboard",
-  "Electric Sign Board",
-  "Camera Pole",
-  "Toll Plaza",
-  "Junction left",
-  "Bend",
-  "Junction right",
-] as const;
-
-
-// ✅ report photos upload
-const REPORT_PHOTO_BUCKET = "reports";
-const REPORT_IMAGE_TABLE = "report_photos";
-
 export default function ProjectReportsPage() {
-  const params = useParams();
-  const projectId = useMemo(() => {
-    const id = (params as any)?.id;
-    return Array.isArray(id) ? id[0] : id;
-  }, [(params as any)?.id]);
+  const params = useParams<{ id: string }>();
+  const projectId = params?.id;
 
   const [project, setProject] = useState<ProjectRow | null>(null);
   const [reports, setReports] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const fetchingRef = useRef(false);
-
 
   const [vmSaving, setVmSaving] = useState<Record<string, boolean>>({});
 
@@ -290,7 +172,7 @@ export default function ProjectReportsPage() {
   const [q, setQ] = useState("");
   const [vmFilter, setVmFilter] = useState<VMFilter>("all");
 
-  // ✅ sorting UI label only (we still always keep "in-list order" by sort_order)
+  // ✅ default ascending order
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   // selection
@@ -319,25 +201,9 @@ export default function ProjectReportsPage() {
   const [dlSecondsLeft, setDlSecondsLeft] = useState(0);
   const [preparedFiles, setPreparedFiles] = useState<PreparedFile[]>([]);
 
-  // ✅ GA setup modal gate before export
+  // ✅ NEW: GA setup modal gate before export
   const [gaSetupOpen, setGaSetupOpen] = useState(false);
   const [gaSetupReason, setGaSetupReason] = useState<string>("");
-
-  // ✅ if GA already exists -> ask Edit or Skip
-  const [gaChoiceOpen, setGaChoiceOpen] = useState(false);
-  const [gaExistingPageId, setGaExistingPageId] = useState<string | null>(null);
-
-  // ✅ Insert report modal (between rows)
-  const [insertOpen, setInsertOpen] = useState(false);
-  const [insertAfterId, setInsertAfterId] = useState<string | null>(null);
-
-  // ✅ Manual points modal (report_path_points)
-  const [manualPointsOpen, setManualPointsOpen] = useState(false);
-  const [manualPointsReportId, setManualPointsReportId] = useState<string | null>(null);
-
-  // ✅ Upload photos (for selected report)
-  const [photoOpen, setPhotoOpen] = useState(false);
-  const [photoReportId, setPhotoReportId] = useState<string | null>(null);
 
   const projectName = projectNameOf(project);
 
@@ -352,19 +218,13 @@ export default function ProjectReportsPage() {
     return { enabled: wmEnabled, text: (wmText || def).trim() };
   }, [wmEnabled, wmText, projectName]);
 
-  // ✅ NOTE:
-  // We ALWAYS order the list by sort_order so insertion works exactly at a position.
-  // sortDir controls ascending/descending display only.
   const fetchReports = async (searchText: string, dir: "asc" | "desc", filter: VMFilter) => {
     if (!projectId) return;
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
 
     let query = supabase
       .from("reports")
-      .select("id, project_id, route_id, category, description, created_at, difficulty, sort_order")
+      .select("id, project_id, category, description, created_at, difficulty")
       .eq("project_id", projectId)
-      .order("sort_order", { ascending: dir === "asc", nullsFirst: false })
       .order("created_at", { ascending: dir === "asc" });
 
     if (filter === "unset") query = query.is("difficulty", null);
@@ -375,13 +235,9 @@ export default function ProjectReportsPage() {
       query = query.textSearch("search_tsv", sText, { type: "websearch", config: "simple" });
     }
 
-    try {
-      const { data, error } = await query;
-      if (error) throw error;
-      setReports((data || []) as ReportRow[]);
-    } finally {
-      fetchingRef.current = false;
-    }
+    const { data, error } = await query;
+    if (error) throw error;
+    setReports((data || []) as ReportRow[]);
   };
 
   const load = async () => {
@@ -417,7 +273,7 @@ export default function ProjectReportsPage() {
     }
   };
 
-  // ✅ On page open, FORCE ascending fetch
+  // ✅ On page open, FORCE ascending fetch (no stale state issues)
   useEffect(() => {
     if (!projectId) return;
 
@@ -527,7 +383,7 @@ export default function ProjectReportsPage() {
     setExportModalOpen(true);
   };
 
-  // ✅ Check GA drawing setup before export, else open GA modal
+  // ✅ NEW: Check GA drawing setup before export, else open GA modal
   const onClickExport = async () => {
     if (!projectId) return;
 
@@ -544,7 +400,6 @@ export default function ProjectReportsPage() {
 
       if (!page?.id) {
         setGaSetupReason("GA drawing setup not found for this project. Please fill it before exporting.");
-        setGaExistingPageId(null);
         setGaSetupOpen(true);
         return;
       }
@@ -559,14 +414,12 @@ export default function ProjectReportsPage() {
 
       if (!count || count < 1) {
         setGaSetupReason("GA drawing images are not added for this project. Please upload at least 1 image.");
-        setGaExistingPageId(page.id);
         setGaSetupOpen(true);
         return;
       }
 
-      // ✅ GA exists -> ask Edit or Skip
-      setGaExistingPageId(page.id);
-      setGaChoiceOpen(true);
+      // ✅ GA is set -> allow existing export flow
+      openExportModal();
     } catch (e: any) {
       alert(e?.message || String(e));
     }
@@ -614,34 +467,6 @@ export default function ProjectReportsPage() {
     setDlOpen(true);
   };
 
-  
-  // ✅ Ensure reports have route_id before DOCX/GPX export (prevents "Points not found" for newly added reports)
-  async function ensureRouteIdForMissingReports(reportIds: string[]) {
-    if (!projectId) return;
-    if (!reportIds.length) return;
-
-    const missing = filteredSortedReports.filter((r) => reportIds.includes(r.id) && !r.route_id);
-    if (!missing.length) return;
-
-    const { data: latestRoute, error: rErr } = await supabase
-      .from("routes")
-      .select("id")
-      .eq("project_id", projectId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (rErr) throw rErr;
-
-    const routeId = (latestRoute as any)?.id as string | undefined;
-    if (!routeId) return; // no route exists
-
-    const ids = missing.map((m) => m.id);
-    const { error: uErr } = await supabase.from("reports").update({ route_id: routeId }).in("id", ids);
-    if (uErr) throw uErr;
-
-    setReports((prev) => prev.map((r) => (ids.includes(r.id) ? { ...r, route_id: routeId } : r)));
-  }
-
   const runExport = async () => {
     if (!projectId) return;
 
@@ -660,13 +485,6 @@ export default function ProjectReportsPage() {
         const countForEst = exportMode === "selectedOne" ? stats.selectedCount : Math.max(stats.shown, 1);
         const est = estimateSeconds(exportMode, countForEst, false);
         startDlUI("Preparing GPX export…", est);
-
-        // ✅ attach route_id for any newly added reports included in export
-        if (exportMode === "all") {
-          await ensureRouteIdForMissingReports(filteredSortedReports.map((r) => r.id));
-        } else {
-          await ensureRouteIdForMissingReports(selectedIdsInOrder);
-        }
 
         if (exportMode === "all") {
           const { blob, fileName: fn } = await generateProjectGPX(supabase, projectId, {
@@ -701,13 +519,6 @@ export default function ProjectReportsPage() {
 
       const est = estimateSeconds(exportMode, count, includePhotos);
       startDlUI("Preparing DOCX export…", est);
-
-      // ✅ attach route_id for any newly added reports included in export
-      if (exportMode === "all" || exportMode === "listed") {
-        await ensureRouteIdForMissingReports(filteredSortedReports.map((r) => r.id));
-      } else {
-        await ensureRouteIdForMissingReports(selectedIdsInOrder);
-      }
 
       const wm = watermarkOpts.enabled ? watermarkOpts : { enabled: false, text: "" };
 
@@ -793,338 +604,18 @@ export default function ProjectReportsPage() {
     }
   };
 
-
-  const openManualPoints = (reportId: string) => {
-    setManualPointsReportId(reportId);
-    setManualPointsOpen(true);
-  };
-
-  const closeManualPoints = () => {
-    setManualPointsOpen(false);
-    setManualPointsReportId(null);
-  };
-
-  const saveManualPoints = async (reportId: string, text: string) => {
-    const raw = String(text || "").trim();
-    if (!raw) throw new Error("Please enter at least 1 point. Format: lat,lon (one per line).");
-
-    const lines = raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    const parsed: Array<{ lat: number; lon: number }> = [];
-    for (const line of lines) {
-      const parts = line.split(/[, \t]+/).map((p) => p.trim()).filter(Boolean);
-      if (parts.length < 2) continue;
-      const lat = Number(parts[0]);
-      const lon = Number(parts[1]);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
-      parsed.push({ lat, lon });
-    }
-    if (!parsed.length) throw new Error('No valid points found. Use format: "12.9716,77.5946" (one per line).');
-
-    const { data: lastRow, error: lErr } = await supabase
-      .from("report_path_points")
-      .select("seq")
-      .eq("report_id", reportId)
-      .order("seq", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (lErr) throw lErr;
-
-    const startSeq = (lastRow as any)?.seq ? Number((lastRow as any).seq) + 1 : 1;
-    const nowIso = new Date().toISOString();
-
-    const rows: ManualPointRow[] = parsed.map((p, idx) => ({
-      report_id: reportId,
-      seq: startSeq + idx,
-      latitude: p.lat,
-      longitude: p.lon,
-      elevation: null,
-      accuracy: null,
-      timestamp: nowIso,
-    }));
-
-    const { error: insErr } = await supabase.from("report_path_points").insert(rows as any);
-    if (insErr) throw insErr;
-  };
-
-  // ✅ open insert modal after a row (between rows)
-  const openInsertModal = (afterReportId: string) => {
-    setInsertAfterId(afterReportId);
-    setInsertOpen(true);
-  };
-
-
-  // ✅ open photo upload modal for exactly 1 selected report
-  const openPhotoUpload = () => {
-    if (stats.selectedCount !== 1) {
-      alert("Please select exactly 1 report to upload photos.");
-      return;
-    }
-    const rid = selectedIdsInOrder[0];
-    setPhotoReportId(rid);
-    setPhotoOpen(true);
-  };
-
-  // ✅ re-number all reports in this project to have safe gaps (10,20,30...)
-  const renumberSortOrders = async () => {
-    if (!projectId) return;
-
-    const { data, error } = await supabase
-      .from("reports")
-      .select("id, sort_order, created_at")
-      .eq("project_id", projectId)
-      .order("sort_order", { ascending: true, nullsFirst: false })
-      .order("created_at", { ascending: true });
-
-    if (error) throw error;
-
-    const rows = (data || []) as ReportRow[];
-    for (let i = 0; i < rows.length; i++) {
-      const id = rows[i].id;
-      const nextOrder = (i + 1) * SORT_STEP;
-      // update only if different (avoid extra writes)
-      if ((rows[i].sort_order ?? null) !== nextOrder) {
-        const { error: uErr } = await supabase.from("reports").update({ sort_order: nextOrder }).eq("id", id);
-        if (uErr) throw uErr;
-      }
-    }
-  };
-
-  // ✅ insert a report exactly after 'afterId'
-// ✅ Insert manual points into report_path_points (used by Add Report modal too)
-  async function insertManualPoints(reportId: string, text: string) {
-    const raw = String(text || "").trim();
-    if (!raw) return;
-
-    const lines = raw
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    const parsed: Array<{ lat: number; lon: number }> = [];
-    for (const line of lines) {
-      const parts = line.split(/[, \t]+/).map((p) => p.trim()).filter(Boolean);
-      if (parts.length < 2) continue;
-      const lat = Number(parts[0]);
-      const lon = Number(parts[1]);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      if (Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
-      parsed.push({ lat, lon });
-    }
-    if (!parsed.length) return;
-
-    const { data: lastRow, error: lErr } = await supabase
-      .from("report_path_points")
-      .select("seq")
-      .eq("report_id", reportId)
-      .order("seq", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (lErr) throw lErr;
-
-    const startSeq = (lastRow as any)?.seq ? Number((lastRow as any).seq) + 1 : 1;
-    const nowIso = new Date().toISOString();
-
-    const rows = parsed.map((p, idx) => ({
-      report_id: reportId,
-      seq: startSeq + idx,
-      latitude: p.lat,
-      longitude: p.lon,
-      elevation: null,
-      accuracy: null,
-      timestamp: nowIso,
-    }));
-
-    const { error: insErr } = await supabase.from("report_path_points").insert(rows as any);
-    if (insErr) throw insErr;
-  }
-
-  const insertReportAfter = async (afterId: string, payload: { category: string; description: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => {
-    if (!projectId) return;
-
-    // make sure we have latest list order in memory
-    const list = filteredSortedReports;
-    const idx = list.findIndex((x) => x.id === afterId);
-    if (idx === -1) throw new Error("Insert position not found.");
-
-    // Ensure current row has sort_order; if not, renumber first
-    const after = list[idx];
-    const next = list[idx + 1] || null;
-
-    const afterOrder = Number(after.sort_order);
-    const nextOrder = next ? Number(next.sort_order) : NaN;
-
-    if (!Number.isFinite(afterOrder)) {
-      await renumberSortOrders();
-      await fetchReports(q, sortDir, vmFilter);
-      return insertReportAfter(afterId, payload);
-    }
-
-    let newOrder: number;
-
-    if (next && Number.isFinite(nextOrder)) {
-      const gap = nextOrder - afterOrder;
-      if (gap <= 1) {
-        // too tight -> renumber then retry
-        await renumberSortOrders();
-        await fetchReports(q, sortDir, vmFilter);
-        return insertReportAfter(afterId, payload);
-      }
-      newOrder = afterOrder + Math.floor(gap / 2);
-    } else {
-      // inserting at end
-      newOrder = afterOrder + SORT_STEP;
-    }
-
-    const { data: authData, error: authErr } = await supabase.auth.getUser();
-    if (authErr) throw authErr;
-    const userId = authData.user?.id;
-    if (!userId) throw new Error("Not logged in.");
-
-    const nowIso = new Date().toISOString();
-
-    const { data: ins, error: insErr } = await supabase
-      .from("reports")
-      .insert({
-        project_id: projectId,
-        user_id: userId,
-        category: payload.category || "Report",
-        description: payload.description || null,
-        difficulty: payload.difficulty ? payload.difficulty : "green",
-        created_at: nowIso,
-        sort_order: newOrder,
-      } as any)
-      .select("id")
-      .single();
-
-    if (insErr) throw insErr;
-
-    const newId = (ins as any)?.id as string;
-
-    // ✅ Photos (optional)
-    if (newId && payload.files?.length) {
-      await uploadReportPhotos(projectId, newId, payload.files);
-    }
-
-    // ✅ Manual points -> report_path_points (optional)
-    if (newId && payload.pointsText?.trim()) {
-      await insertManualPoints(newId, payload.pointsText);
-    }
-
-    // refresh list
-    await fetchReports(q, sortDir, vmFilter);
-    setSelected({});
-  };
-
   return (
     <div style={styles.containerFluid}>
       <div style={styles.pageInner}>
-        {/* ✅ INSERT REPORT MODAL */}
-        {insertOpen && projectId && insertAfterId && (
-          <InsertReportModal
-            afterIndex={filteredSortedReports.findIndex((x) => x.id === insertAfterId) + 1}
-            onClose={() => setInsertOpen(false)}
-            onCreate={async (p) => {
-              try {
-                await insertReportAfter(insertAfterId, p);
-                setInsertOpen(false);
-              } catch (e: any) {
-                alert(e?.message || String(e));
-              }
-            }}
-          />
-        )}
-
-
-        {/* ✅ PHOTO UPLOAD MODAL (for selected report) */}
-        {photoOpen && projectId && photoReportId && (
-          <PhotoUploadModal
-            reportId={photoReportId}
-            onClose={() => setPhotoOpen(false)}
-            onUploaded={async () => {
-              setPhotoOpen(false);
-              await fetchReports(q, sortDir, vmFilter);
-            }}
-          />
-        )}
-
-        {/* ✅ MANUAL POINTS MODAL */}
-        {manualPointsOpen && manualPointsReportId && (
-          <ManualPointsModal
-            reportId={manualPointsReportId}
-            onClose={closeManualPoints}
-            onSave={async (text) => {
-              try {
-                await saveManualPoints(manualPointsReportId, text);
-                closeManualPoints();
-                alert("Points saved.");
-              } catch (e: any) {
-                alert(e?.message || String(e));
-              }
-            }}
-          />
-
-        )}
-
-        {/* ✅ GA CHOICE MODAL (Edit or Skip) */}
-        {gaChoiceOpen && projectId && (
-          <div style={styles.modalOverlay} onMouseDown={() => setGaChoiceOpen(false)}>
-            <div
-              style={{ ...styles.modalCard, width: "min(560px, 96vw)" }}
-              onMouseDown={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-modal="true"
-              aria-label="GA exists"
-            >
-              <div style={styles.modalTitle}>GA Setup Already Exists</div>
-
-              <div style={styles.modalHint}>
-                GA setup already exists for this project. Do you want to <b>Edit</b> it (Objective + Map + Locations +
-                GA images + Conclusion) or <b>Skip</b> and continue export?
-              </div>
-
-
-              <div style={styles.modalActions}>
-                <button
-                  style={styles.btnGhost}
-                  onClick={() => {
-                    setGaChoiceOpen(false);
-                    openExportModal();
-                  }}
-                >
-                  Skip
-                </button>
-
-                <button
-                  style={styles.btnPrimary}
-                  onClick={() => {
-                    setGaChoiceOpen(false);
-                    setGaSetupReason("Edit GA setup (Objective, Map, Locations, GA images, Conclusion).");
-                    setGaSetupOpen(true);
-                  }}
-                >
-                  Edit
-                </button>
-              </div>
-
-              <div style={styles.modalNote}>Locations inputs are near “Upload map” (4 inputs).</div>
-            </div>
-          </div>
-        )}
-
         {/* ✅ GA SETUP MODAL (before export) */}
         {gaSetupOpen && projectId && (
           <RouteSetupModal
             projectId={projectId}
             reason={gaSetupReason}
-            existingPageId={gaExistingPageId}
             onClose={() => setGaSetupOpen(false)}
             onSaved={() => {
               setGaSetupOpen(false);
+              // ✅ now allow export
               openExportModal();
             }}
           />
@@ -1150,12 +641,7 @@ export default function ProjectReportsPage() {
                 <div style={styles.routeLabel}>Format</div>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <label style={styles.radioRow}>
-                    <input
-                      type="radio"
-                      name="fmt"
-                      checked={exportFormat === "docx"}
-                      onChange={() => setExportFormat("docx")}
-                    />
+                    <input type="radio" name="fmt" checked={exportFormat === "docx"} onChange={() => setExportFormat("docx")} />
                     <div>
                       <div style={styles.radioTitle}>DOCX</div>
                       <div style={styles.radioSub}>Table export with photos + watermark</div>
@@ -1445,7 +931,9 @@ export default function ProjectReportsPage() {
         <div style={styles.card}>
           <div style={styles.cardHeader}>
             <div style={styles.cardTitle}>Reports</div>
-            <div style={styles.cardHint}>{q.trim() ? `Results for “${q.trim()}”` : `Showing ${stats.shown} reports`}</div>
+            <div style={styles.cardHint}>
+              {q.trim() ? `Results for “${q.trim()}” :` : `Showing ${stats.shown} reports`}
+            </div>
           </div>
 
           <div style={styles.controlsRow}>
@@ -1505,15 +993,6 @@ export default function ProjectReportsPage() {
                 </div>
               )}
             </div>
-
-            <button
-              style={styles.btnGhost}
-              onClick={openPhotoUpload}
-              disabled={stats.selectedCount !== 1}
-              title={stats.selectedCount !== 1 ? "Select exactly 1 report" : "Upload photos to selected report"}
-            >
-              Upload photos
-            </button>
           </div>
         </div>
 
@@ -1568,137 +1047,88 @@ export default function ProjectReportsPage() {
                     const vmValue = normalizeVM(r.difficulty);
 
                     return (
-                      <React.Fragment key={r.id}>
-                        <tr>
-                          <td className="col-idx" style={styles.td}>
-                            {i + 1}
-                          </td>
+                      <tr key={r.id}>
+                        <td className="col-idx" style={styles.td}>
+                          {i + 1}
+                        </td>
 
-                          <td className="col-sel" style={styles.td}>
-                            <input
-                              type="checkbox"
-                              checked={!!selected[r.id]}
-                              onChange={() => toggleOne(r.id)}
-                              style={{ width: 18, height: 18, cursor: "pointer" }}
-                            />
-                          </td>
+                        <td className="col-sel" style={styles.td}>
+                          <input
+                            type="checkbox"
+                            checked={!!selected[r.id]}
+                            onChange={() => toggleOne(r.id)}
+                            style={{ width: 18, height: 18, cursor: "pointer" }}
+                          />
+                        </td>
 
-                          <td className="col-cat" style={styles.td}>
-                            <div style={styles.catTitle}>{r.category || "Report"}</div>
-                            <div style={styles.subtle}>Includes photos</div>
-                          </td>
+                        <td className="col-cat" style={styles.td}>
+                          <div style={styles.catTitle}>{r.category || "Report"}</div>
+                          <div style={styles.subtle}>Includes photos</div>
+                        </td>
 
-                          <td className="col-desc" style={styles.td}>
-                            <div style={styles.descCell}>
-                              {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
-                            </div>
-                          </td>
+                        <td className="col-desc" style={styles.td}>
+                          <div style={styles.descCell}>
+                            {desc ? desc : <span style={{ color: "#98A2B3", fontWeight: 800 }}>No description</span>}
+                          </div>
+                        </td>
 
-                          <td className="col-created" style={styles.td}>
-                            <span style={styles.mutedWrap}>{created}</span>
-                          </td>
+                        <td className="col-created" style={styles.td}>
+                          <span style={styles.mutedWrap}>{created}</span>
+                        </td>
 
-                          <td className="col-id" style={styles.td}>
-                            <span style={styles.codePillWrap} title={r.id}>
-                              {shortId}
-                            </span>
-                          </td>
+                        <td className="col-id" style={styles.td}>
+                          <span style={styles.codePillWrap} title={r.id}>
+                            {shortId}
+                          </span>
+                        </td>
 
-                          <td className="col-vm" style={styles.td}>
-                            <select
-                              value={vmValue || ""}
-                              disabled={!!vmSaving[r.id]}
-                              onChange={(e) => onChangeVM(r.id, e.target.value)}
-                              style={{
-                                height: 38,
-                                borderRadius: 14,
-                                border: "1px solid #EAECF0",
-                                padding: "0 12px",
-                                fontWeight: 950,
-                                background:
-                                  vmValue === "green"
-                                    ? "#EAFBF0"
-                                    : vmValue === "yellow"
-                                      ? "#FFFBEB"
-                                      : vmValue === "red"
-                                        ? "#FEF2F2"
-                                        : "#F2F4F7",
-                                color:
-                                  vmValue === "green"
-                                    ? "#067647"
-                                    : vmValue === "yellow"
-                                      ? "#92400E"
-                                      : vmValue === "red"
-                                        ? "#B42318"
-                                        : "#475467",
-                                cursor: vmSaving[r.id] ? "not-allowed" : "pointer",
-                                outline: "none",
-                                minWidth: 130,
-                                opacity: vmSaving[r.id] ? 0.7 : 1,
-                              }}
-                              title="Update route difficulty"
-                            >
-                              <option value="">Not set</option>
-                              <option value="green">Green</option>
-                              <option value="yellow">Yellow</option>
-                              <option value="red">Red</option>
-                            </select>
-                          </td>
+                        <td className="col-vm" style={styles.td}>
+                          <select
+                            value={vmValue || ""}
+                            disabled={!!vmSaving[r.id]}
+                            onChange={(e) => onChangeVM(r.id, e.target.value)}
+                            style={{
+                              height: 38,
+                              borderRadius: 14,
+                              border: "1px solid #EAECF0",
+                              padding: "0 12px",
+                              fontWeight: 950,
+                              background:
+                                vmValue === "green"
+                                  ? "#EAFBF0"
+                                  : vmValue === "yellow"
+                                    ? "#FFFBEB"
+                                    : vmValue === "red"
+                                      ? "#FEF2F2"
+                                      : "#F2F4F7",
+                              color:
+                                vmValue === "green"
+                                  ? "#067647"
+                                  : vmValue === "yellow"
+                                    ? "#92400E"
+                                    : vmValue === "red"
+                                      ? "#B42318"
+                                      : "#475467",
+                              cursor: vmSaving[r.id] ? "not-allowed" : "pointer",
+                              outline: "none",
+                              minWidth: 130,
+                              opacity: vmSaving[r.id] ? 0.7 : 1,
+                            }}
+                            title="Update route difficulty"
+                          >
+                            <option value="">Not set</option>
+                            <option value="green">Green</option>
+                            <option value="yellow">Yellow</option>
+                            <option value="red">Red</option>
+                          </select>
+                        </td>
 
-                          <td className="col-act" style={{ ...styles.td, textAlign: "right" }}>
-                            <div style={{ display: "inline-flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                              <button
-                                type="button"
-                                onClick={() => openManualPoints(r.id)}
-                                style={{
-                                  padding: "9px 12px",
-                                  borderRadius: 12,
-                                  border: "1px solid #EAECF0",
-                                  background: "#fff",
-                                  color: "#344054",
-                                  fontWeight: 900,
-                                  fontSize: 12,
-                                  height: 36,
-                                  cursor: "pointer",
-                                  whiteSpace: "nowrap",
-                                }}
-                                title="Add manual lat/long points"
-                              >
-                                Points
-                              </button>
-
-                              <Link href={`/reports/${r.id}`} style={styles.btnOpen} title="Open report">
-                                Open
-                              </Link>
-                            </div>
-                          </td>
-                        </tr>
-
-                        {/* ✅ BUTTON BETWEEN ROWS (Insert after this row) */}
-                        <tr>
-                          <td colSpan={8} style={{ padding: 0, borderBottom: "1px solid #F2F4F7" }}>
-                            <div style={{ padding: "8px 12px", display: "flex", justifyContent: "center" }}>
-                              <button
-                                type="button"
-                                style={{
-                                  padding: "8px 12px",
-                                  borderRadius: 12,
-                                  border: "1px dashed #D0D5DD",
-                                  background: "#fff",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                  fontSize: 12,
-                                  color: "#344054",
-                                }}
-                                onClick={() => openInsertModal(r.id)}
-                                title="Insert a new report after this row"
-                              >
-                                + Add report here (after #{i + 1})
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      </React.Fragment>
+                        <td className="col-act" style={{ ...styles.td, textAlign: "right" }}>
+                          <Link href={`/reports/${r.id}`} style={styles.btnOpen} title="Open report">
+                            Open
+                          </Link>
+                        </td>
+                      </tr>
                     );
                   })}
                 </tbody>
@@ -1734,7 +1164,7 @@ export default function ProjectReportsPage() {
                 width: 150px;
               }
               .col-act {
-                width: 220px;
+                width: 110px;
               }
               @media (max-width: 1200px) {
                 .col-desc {
@@ -1765,7 +1195,7 @@ export default function ProjectReportsPage() {
                   width: auto;
                 }
                 .col-act {
-                  width: 160px;
+                  width: 90px;
                 }
               }
             `}</style>
@@ -1776,420 +1206,15 @@ export default function ProjectReportsPage() {
   );
 }
 
-/** ✅ Small modal to create a new report exactly at a position */
-function InsertReportModal({
-  afterIndex,
-  onClose,
-  onCreate,
-}: {
-  afterIndex: number;
-  onClose: () => void;
-  onCreate: (payload: { category: string; description: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => void | Promise<void>;
-}) {
-  const [category, setCategory] = useState("");
-  const [customCategory, setCustomCategory] = useState("");
-  const [description, setDescription] = useState("");
-  const [pointsText, setPointsText] = useState("");
-  const [difficulty, setDifficulty] = useState<VehicleMovement>("");
-  const [files, setFiles] = useState<File[]>([]);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const addFiles = (list: FileList | null) => {
-    if (!list?.length) return;
-    const next = Array.from(list);
-    const existingKeys = new Set(files.map((f) => `${f.name}__${f.size}`));
-    const filtered = next.filter((f) => !existingKeys.has(`${f.name}__${f.size}`));
-    setFiles((p) => [...p, ...filtered]);
-  };
-
-  const submit = async () => {
-    setSaving(true);
-    try {
-      const finalCategory =
-        category === "__custom__"
-          ? (customCategory.trim() || "Report")
-          : (category.trim() || "Report");
-
-      await onCreate({
-      category: finalCategory,
-      description: description.trim(),
-      difficulty,
-      files,
-      pointsText: pointsText.trim(),
-    });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={styles.modalOverlay} onMouseDown={onClose}>
-      <div
-        style={{ ...styles.modalCard, width: "min(620px, 96vw)" }}
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Insert report"
-      >
-        <div style={styles.modalTitle}>Add Report (insert after #{afterIndex})</div>
-        <div style={styles.modalHint}>
-          This will create a new report and place it immediately after the selected row.
-        </div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Category</div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <select
-              value={category}
-              onChange={(e) => {
-                const v = e.target.value;
-                setCategory(v);
-                if (v !== "__custom__") setCustomCategory("");
-              }}
-              style={{
-                height: 44,
-                borderRadius: 14,
-                border: "1px solid #D0D5DD",
-                padding: "0 14px",
-                fontWeight: 900,
-                outline: "none",
-                background: "#fff",
-              }}
-            >
-              <option value="">Select category…</option>
-              {CATEGORY_OPTIONS.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-              <option value="__custom__">+ Custom…</option>
-            </select>
-
-            <input
-              value={customCategory}
-              onChange={(e) => setCustomCategory(e.target.value)}
-              disabled={category !== "__custom__"}
-              placeholder="Type custom category"
-              style={{
-                height: 44,
-                borderRadius: 14,
-                border: "1px solid #D0D5DD",
-                padding: "0 14px",
-                fontWeight: 900,
-                outline: "none",
-                background: "#fff",
-                opacity: category === "__custom__" ? 1 : 0.6,
-              }}
-            />
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Description</div>
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Optional description..."
-            style={{
-              width: "100%",
-              minHeight: 90,
-              borderRadius: 14,
-              border: "1px solid #D0D5DD",
-              padding: "12px 12px",
-              fontSize: 14,
-              fontWeight: 700,
-              outline: "none",
-              resize: "vertical",
-            }}
-          />
-        </div>
-
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Route difficulty</div>
-          <select
-            value={difficulty || ""}
-            onChange={(e) => setDifficulty(vmDisplayToDb(e.target.value))}
-            style={{
-              height: 44,
-              borderRadius: 14,
-              border: "1px solid #D0D5DD",
-              padding: "0 14px",
-              fontWeight: 950,
-              background:
-                difficulty === "green"
-                  ? "#EAFBF0"
-                  : difficulty === "yellow"
-                    ? "#FFFBEB"
-                    : difficulty === "red"
-                      ? "#FEF2F2"
-                      : "#fff",
-              color:
-                difficulty === "green"
-                  ? "#067647"
-                  : difficulty === "yellow"
-                    ? "#92400E"
-                    : difficulty === "red"
-                      ? "#B42318"
-                      : "#344054",
-              outline: "none",
-              cursor: "pointer",
-            }}
-            title="Set difficulty for new report"
-          >
-            <option value="">Not set</option>
-            <option value="green">Green</option>
-            <option value="yellow">Yellow</option>
-            <option value="red">Red</option>
-          </select>
-        </div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Photos (optional)</div>
-
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => {
-              addFiles(e.target.files);
-              if (fileRef.current) fileRef.current.value = "";
-            }}
-          />
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button type="button" style={styles.btnPrimary} onClick={() => fileRef.current?.click()} disabled={saving}>
-              Choose photos
-            </button>
-            <button type="button" style={styles.btnGhost} onClick={() => setFiles([])} disabled={!files.length || saving}>
-              Clear
-            </button>
-          </div>
-
-          {files.length ? (
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
-              Selected: {files.length} file(s)
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#98A2B3" }}>No photos selected.</div>
-          )}
-        </div>
-
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Points (optional)</div>
-          <div style={styles.modalHint}>
-            Paste <b>lat,lon</b> (one per line). Example:{" "}
-            <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-              12.9716,77.5946
-            </span>
-          </div>
-
-          <textarea
-            value={pointsText}
-            onChange={(e) => setPointsText(e.target.value)}
-            placeholder="lat,lon (one per line)"
-            style={{
-              width: "100%",
-              minHeight: 120,
-              borderRadius: 14,
-              border: "1px solid #D0D5DD",
-              padding: "12px 12px",
-              fontSize: 14,
-              fontWeight: 700,
-              outline: "none",
-              resize: "vertical",
-            }}
-          />
-        </div>
-
-        <div style={styles.modalActions}>
-          <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          <button style={styles.btnPrimary} onClick={submit} disabled={saving}>
-            {saving ? "Adding..." : "Add Report"}
-          </button>
-        </div>
-
-        <div style={styles.modalNote}>
-          Note: This requires <b>reports.sort_order</b> column (integer/number). Existing reports should be backfilled with
-          10,20,30... for stable insertion.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** ✅ Modal to upload photos for one report (from list page) */
-function PhotoUploadModal({
-  reportId,
-  onClose,
-  onUploaded,
-}: {
-  reportId: string;
-  onClose: () => void;
-  onUploaded: () => void | Promise<void>;
-}) {
-  const params = useParams();
-  const projectId = useMemo(() => {
-    const id = (params as any)?.id;
-    return Array.isArray(id) ? id[0] : id;
-  }, [(params as any)?.id]);
-
-  const [files, setFiles] = useState<File[]>([]);
-  const [saving, setSaving] = useState(false);
-
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  const addFiles = (list: FileList | null) => {
-    if (!list?.length) return;
-    const next = Array.from(list);
-    const existingKeys = new Set(files.map((f) => `${f.name}__${f.size}`));
-    const filtered = next.filter((f) => !existingKeys.has(`${f.name}__${f.size}`));
-    setFiles((p) => [...p, ...filtered]);
-  };
-
-  const removeAt = (idx: number) => setFiles((p) => p.filter((_, i) => i !== idx));
-
-  const upload = async () => {
-    if (!projectId) return;
-    if (!files.length) {
-      alert("Please choose at least 1 photo.");
-      return;
-    }
-
-    setSaving(true);
-    try {
-      await uploadReportPhotos(projectId, reportId, files);
-      await onUploaded();
-    } catch (e: any) {
-      alert(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={styles.modalOverlay} onMouseDown={onClose}>
-      <div
-        style={{ ...styles.modalCard, width: "min(760px, 96vw)" }}
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Upload photos"
-      >
-        <div style={styles.modalTitle}>Upload Photos</div>
-        <div style={styles.modalHint}>
-          Upload photos for this report. (Bucket: <b>{REPORT_PHOTO_BUCKET}</b>, Table: <b>{REPORT_IMAGE_TABLE}</b>)
-        </div>
-
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          style={{ display: "none" }}
-          onChange={(e) => {
-            addFiles(e.target.files);
-            if (inputRef.current) inputRef.current.value = "";
-          }}
-        />
-
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button type="button" style={styles.btnPrimary} onClick={() => inputRef.current?.click()} disabled={saving}>
-            Choose photos
-          </button>
-          <button type="button" style={styles.btnGhost} onClick={() => setFiles([])} disabled={!files.length || saving}>
-            Clear
-          </button>
-        </div>
-
-        {!files.length ? (
-          <div
-            style={{
-              padding: 14,
-              borderRadius: 14,
-              border: "1px dashed #D0D5DD",
-              background: "#F9FAFB",
-              fontWeight: 800,
-              color: "#667085",
-              marginTop: 6,
-            }}
-          >
-            No photos selected.
-          </div>
-        ) : (
-          <div style={{ display: "grid", gap: 10, marginTop: 6 }}>
-            {files.map((f, idx) => (
-              <div
-                key={`${f.name}-${idx}`}
-                style={{
-                  border: "1px solid #EAECF0",
-                  borderRadius: 14,
-                  padding: 10,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 10,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 950, color: "#101828", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {f.name}
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>{(f.size / 1024).toFixed(1)} KB</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => removeAt(idx)}
-                  style={{
-                    padding: "8px 10px",
-                    borderRadius: 12,
-                    border: "1px solid #FECDD6",
-                    background: "#FFF1F3",
-                    color: "#B42318",
-                    fontWeight: 900,
-                    cursor: "pointer",
-                  }}
-                  disabled={saving}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div style={styles.modalActions}>
-          <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          <button style={styles.btnPrimary} onClick={upload} disabled={saving}>
-            {saving ? "Uploading..." : "Upload"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-/** ✅ Modal that collects Objective + Map + GA images + Locations + Conclusion and saves to Supabase */
+/** ✅ Modal that collects Objective + Map + GA images and saves to Supabase */
 function RouteSetupModal({
   projectId,
   reason,
-  existingPageId,
   onClose,
   onSaved,
 }: {
   projectId: string;
   reason: string;
-  existingPageId?: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -2197,23 +1222,6 @@ function RouteSetupModal({
   const [err, setErr] = useState<string | null>(null);
 
   const [objective, setObjective] = useState("");
-
-  const [loadingExisting, setLoadingExisting] = useState(false);
-  const [existingMapUrl, setExistingMapUrl] = useState<string>("");
-
-  // ✅ Conclusion HTML (TinyMCE)
-  const [conclusionHtml, setConclusionHtml] = useState<string>("");
-  const conclusionRef = useRef<any>(null);
-
-  // ✅ Locations (4 inputs)
-  const [routeLocations, setRouteLocations] = useState<string[]>(["", "", "", ""]);
-  const updateLoc = (idx: number, val: string) => {
-    setRouteLocations((p) => {
-      const copy = [...p];
-      copy[idx] = val;
-      return copy;
-    });
-  };
 
   const presetMaps: PresetMap[] = useMemo(
     () => [
@@ -2237,7 +1245,7 @@ function RouteSetupModal({
     return presetMaps.find((m) => m.id === selectedPresetMapId) || null;
   }, [presetMaps, selectedPresetMapId]);
 
-  const finalMapPreview = mapPickMode === "upload" ? (uploadedMapPreview || existingMapUrl) : selectedPresetMap?.src || "";
+  const finalMapPreview = mapPickMode === "upload" ? uploadedMapPreview : selectedPresetMap?.src || "";
 
   const [gaFiles, setGaFiles] = useState<File[]>([]);
   const gaInputRef = useRef<HTMLInputElement | null>(null);
@@ -2259,55 +1267,6 @@ function RouteSetupModal({
   };
 
   const removeGaAt = (idx: number) => setGaFiles((p) => p.filter((_, i) => i !== idx));
-
-  // ✅ Load existing setup when editing (best-effort)
-  useEffect(() => {
-    if (!existingPageId) return;
-
-    (async () => {
-      setLoadingExisting(true);
-      setErr(null);
-
-      try {
-        const { data: page, error: pErr } = await supabase
-          .from("project_route_pages")
-          .select("id, objective, map_mode, preset_map_key, map_file_url, conclusion_html")
-          .eq("id", existingPageId)
-          .maybeSingle();
-        if (pErr) throw pErr;
-
-        if (page) {
-          setObjective((page as any).objective || "");
-          setMapPickMode(((page as any).map_mode as PickMode) || "preset");
-          setSelectedPresetMapId((page as any).preset_map_key || presetMaps[0]?.id || "");
-          setExistingMapUrl((page as any).map_file_url || "");
-          setConclusionHtml((page as any).conclusion_html || "");
-        }
-
-        // Locations table is optional; if it doesn't exist, ignore.
-        try {
-          const { data: locs } = await supabase
-            .from("project_route_page_locations")
-            .select("id, label, pin_type, sort_order")
-            .eq("project_id", projectId)
-            .eq("project_page_id", existingPageId)
-            .order("sort_order", { ascending: true });
-
-          if (locs && (locs as any[]).length) {
-            const labels = (locs as RouteLocationRow[]).map((x) => String(x.label || "").trim());
-            setRouteLocations([labels[0] || "", labels[1] || "", labels[2] || "", labels[3] || ""]);
-          }
-        } catch {
-          // ignore
-        }
-      } catch (e: any) {
-        setErr(e?.message || String(e));
-      } finally {
-        setLoadingExisting(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [existingPageId]);
 
   async function uploadToBucket(bucket: string, path: string, file: File) {
     const { data, error } = await supabase.storage.from(bucket).upload(path, file, {
@@ -2343,20 +1302,12 @@ function RouteSetupModal({
         map_file_url = null;
       } else {
         preset_map_key = null;
-
-        if (uploadedMapFile) {
-          const ext = uploadedMapFile.name.split(".").pop() || "png";
-          const storagePath = `projects/${projectId}/${Date.now()}_map.${ext}`;
-          const uploaded = await uploadToBucket("route-maps", storagePath, uploadedMapFile);
-          map_file_url = uploaded.publicUrl;
-        } else if (existingMapUrl) {
-          map_file_url = existingMapUrl;
-        } else {
-          throw new Error("Please upload a route map image.");
-        }
+        if (!uploadedMapFile) throw new Error("Please upload a route map image.");
+        const ext = uploadedMapFile.name.split(".").pop() || "png";
+        const storagePath = `projects/${projectId}/${Date.now()}_map.${ext}`;
+        const uploaded = await uploadToBucket("route-maps", storagePath, uploadedMapFile);
+        map_file_url = uploaded.publicUrl;
       }
-
-      const currentConclusion = (conclusionRef.current?.getContent?.() ?? conclusionHtml ?? "").trim();
 
       // Upsert page row (latest)
       const { data: existing, error: exErr } = await supabase
@@ -2378,7 +1329,6 @@ function RouteSetupModal({
             map_mode: mapPickMode,
             preset_map_key,
             map_file_url,
-            conclusion_html: currentConclusion || null,
           })
           .eq("id", existing.id);
         if (updErr) throw updErr;
@@ -2393,40 +1343,11 @@ function RouteSetupModal({
             map_mode: mapPickMode,
             preset_map_key,
             map_file_url,
-            conclusion_html: currentConclusion || null,
           })
           .select("id")
           .single();
         if (insErr) throw insErr;
-        pageId = (ins as any).id;
-      }
-
-      // ✅ Save locations (best-effort; if table doesn't exist, don't fail)
-      try {
-        await supabase
-          .from("project_route_page_locations")
-          .delete()
-          .eq("project_id", projectId)
-          .eq("project_page_id", pageId);
-
-        const labels = routeLocations.map((x) => String(x || "").trim());
-        const locRows = labels
-          .map((label, idx) => ({
-            project_page_id: pageId,
-            project_id: projectId,
-            user_id: userId,
-            label,
-            pin_type: idx === 0 ? "start" : idx === 3 ? "end" : "mid",
-            sort_order: idx,
-          }))
-          .filter((r) => !!r.label);
-
-        if (locRows.length) {
-          const { error: locErr } = await supabase.from("project_route_page_locations").insert(locRows as any);
-          if (locErr) throw locErr;
-        }
-      } catch (e) {
-        console.warn("Locations save skipped (table may not exist):", e);
+        pageId = ins.id;
       }
 
       // Upload GA images + insert rows
@@ -2475,9 +1396,9 @@ function RouteSetupModal({
           {reason || "Please complete GA Drawing setup to export."}
         </div>
 
-        {loadingExisting ? <div style={styles.modalHint}>Loading existing setup…</div> : null}
-
-        {err ? <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>{err}</div> : null}
+        {err ? (
+          <div style={{ ...styles.modalHint, color: "#b42318", fontWeight: 900 }}>{err}</div>
+        ) : null}
 
         {/* Objective */}
         <div style={{ display: "grid", gap: 8 }}>
@@ -2585,77 +1506,16 @@ function RouteSetupModal({
                 ) : null}
               </>
             )}
-
-            {/* ✅ Locations (4 inputs) */}
-            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-              <div style={styles.routeLabel}>Locations</div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 12, alignItems: "start" }}>
-                <div style={{ display: "grid", gap: 14, paddingTop: 8, justifyItems: "center" }}>
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.circle} />
-                  <div style={locStyles.dots} />
-                  <div style={locStyles.pin}>📍</div>
-                </div>
-
-                <div style={{ display: "grid", gap: 12 }}>
-                  {routeLocations.map((val, idx) => (
-                    <input
-                      key={idx}
-                      value={val}
-                      onChange={(e) => updateLoc(idx, e.target.value)}
-                      placeholder={idx === 0 ? "Start location" : idx === 3 ? "End location" : "Stop location"}
-                      style={{
-                        height: 44,
-                        borderRadius: 14,
-                        border: "1px solid #D0D5DD",
-                        padding: "0 14px",
-                        fontWeight: 900,
-                        outline: "none",
-                        background: "#fff",
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <div style={styles.modalNote}>Example: Kappalur → Salem → Krishnagiri → Hosur</div>
-            </div>
           </div>
 
           <div style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12, background: "#F9FAFB" }}>
             <div style={styles.routeLabel}>Map preview</div>
-            <div
-              style={{
-                marginTop: 8,
-                border: "1px solid #EAECF0",
-                borderRadius: 14,
-                overflow: "hidden",
-                background: "#fff",
-                height: MAP_PREVIEW_HEIGHT,
-              }}
-            >
+            <div style={{ marginTop: 8, border: "1px solid #EAECF0", borderRadius: 14, overflow: "hidden", background: "#fff" }}>
               {finalMapPreview ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={finalMapPreview}
-                  alt="Map preview"
-                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                />
+                <img src={finalMapPreview} alt="Map preview" style={{ width: "100%", height: 280, objectFit: "contain" }} />
               ) : (
-                <div
-                  style={{
-                    height: MAP_PREVIEW_HEIGHT,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontWeight: 800,
-                    color: "#667085",
-                  }}
-                >
+                <div style={{ height: 280, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, color: "#667085" }}>
                   No map selected
                 </div>
               )}
@@ -2685,22 +1545,18 @@ function RouteSetupModal({
             <button type="button" style={styles.btnPrimary} onClick={() => gaInputRef.current?.click()}>
               Add GA images
             </button>
-            <button type="button" style={styles.btnGhost} onClick={() => setGaFiles([])} disabled={!gaFiles.length}>
+            <button
+              type="button"
+              style={styles.btnGhost}
+              onClick={() => setGaFiles([])}
+              disabled={!gaFiles.length}
+            >
               Clear
             </button>
           </div>
 
           {!gaFiles.length ? (
-            <div
-              style={{
-                padding: 14,
-                borderRadius: 14,
-                border: "1px dashed #D0D5DD",
-                background: "#F9FAFB",
-                fontWeight: 800,
-                color: "#667085",
-              }}
-            >
+            <div style={{ padding: 14, borderRadius: 14, border: "1px dashed #D0D5DD", background: "#F9FAFB", fontWeight: 800, color: "#667085" }}>
               No GA images selected.
             </div>
           ) : (
@@ -2709,15 +1565,7 @@ function RouteSetupModal({
                 <div key={`${p.name}-${idx}`} style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontWeight: 950,
-                          color: "#101828",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
+                      <div style={{ fontWeight: 950, color: "#101828", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {p.name}
                       </div>
                       <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>{(p.size / 1024).toFixed(1)} KB</div>
@@ -2739,49 +1587,14 @@ function RouteSetupModal({
                     </button>
                   </div>
 
-                  <div
-                    style={{
-                      marginTop: 10,
-                      borderRadius: 14,
-                      overflow: "hidden",
-                      border: "1px solid #EAECF0",
-                      background: "#F9FAFB",
-                      height: GA_PREVIEW_HEIGHT,
-                    }}
-                  >
+                  <div style={{ marginTop: 10, borderRadius: 14, overflow: "hidden", border: "1px solid #EAECF0", background: "#F9FAFB" }}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.url} alt="GA preview" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                    <img src={p.url} alt="GA preview" style={{ width: "100%", height: 220, objectFit: "contain" }} />
                   </div>
                 </div>
               ))}
             </div>
           )}
-        </div>
-
-        {/* Conclusion */}
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>Conclusion & Certification</div>
-
-          <div style={{ border: "1px solid #EAECF0", borderRadius: 16, overflow: "hidden", background: "#fff" }}>
-            <Editor
-              apiKey="3fr142nwyhd2jop9d509ekq6i2ks2u6dmrbgm8c74gu5xrml"
-              onInit={(_evt, editor) => (conclusionRef.current = editor)}
-              value={conclusionHtml}
-              onEditorChange={(v) => setConclusionHtml(v)}
-              init={{
-                height: 260,
-                menubar: false,
-                branding: false,
-                statusbar: false,
-                plugins: "lists",
-                toolbar:
-                  "undo redo | fontfamily fontsize | bold italic underline | alignleft aligncenter alignright | bullist numlist | removeformat",
-                fontsize_formats: "10pt 12pt 14pt 16pt 18pt 20pt 24pt 30pt 36pt 48pt",
-                content_style:
-                  "body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size: 14pt; }",
-              }}
-            />
-          </div>
         </div>
 
         <div style={styles.modalActions}>
@@ -2793,98 +1606,13 @@ function RouteSetupModal({
           </button>
         </div>
 
-        <div style={styles.modalNote}>After saving, Export will open automatically.</div>
-      </div>
-    </div>
-  );
-}
-
-/** ✅ Manual points modal that writes to report_path_points (lat,lon per line) */
-function ManualPointsModal({
-  reportId,
-  onClose,
-  onSave,
-}: {
-  reportId: string;
-  onClose: () => void;
-  onSave: (text: string) => void | Promise<void>;
-}) {
-  const [text, setText] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  const submit = async () => {
-    setSaving(true);
-    try {
-      await onSave(text);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={styles.modalOverlay} onMouseDown={onClose}>
-      <div
-        style={{ ...styles.modalCard, width: "min(720px, 96vw)" }}
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Manual points"
-      >
-        <div style={styles.modalTitle}>Add Points (Manual)</div>
-
-        <div style={styles.modalHint}>
-          Enter points as <b>lat,lon</b> (one per line). Example:
-          <div style={{ marginTop: 6, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-            12.9716,77.5946<br />
-            12.9719,77.5952<br />
-            12.9723,77.5960
-          </div>
-        </div>
-
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="lat,lon (one per line)"
-          style={{
-            width: "100%",
-            minHeight: 180,
-            borderRadius: 14,
-            border: "1px solid #D0D5DD",
-            padding: "12px 12px",
-            fontSize: 14,
-            fontWeight: 700,
-            outline: "none",
-            resize: "vertical",
-          }}
-        />
-
-        <div style={styles.modalActions}>
-          <button style={styles.btnGhost} onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          <button style={styles.btnPrimary} onClick={submit} disabled={saving}>
-            {saving ? "Saving..." : "Save Points"}
-          </button>
-        </div>
-
         <div style={styles.modalNote}>
-          Saved to <b>report_path_points</b> for report: <span style={{ fontWeight: 900 }}>{reportId.slice(0, 8)}...</span>
+          After saving, Export will open automatically.
         </div>
       </div>
     </div>
   );
 }
-
-const locStyles: Record<string, React.CSSProperties> = {
-  circle: { width: 12, height: 12, borderRadius: 999, border: "2px solid #111", background: "#fff" },
-  dots: {
-    width: 2,
-    height: 18,
-    borderRadius: 2,
-    background: "repeating-linear-gradient(to bottom, #111 0 3px, transparent 3px 7px)",
-  },
-  pin: { fontSize: 18, lineHeight: "18px", color: "#B42318" },
-};
 
 // ✅ keep your existing styles object EXACTLY as-is below (unchanged)
 const styles: Record<string, React.CSSProperties> = {

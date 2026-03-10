@@ -2,24 +2,29 @@
 
 /**
  * lib/download.ts (FULL FILE)
- * ✅ Fixes included:
- * 1) Uses `difficulty` column (NOT vehicle_movement)
- * 2) DOCX "LOCATION" column shows readable place name (Thomas Mount, Guindy, etc.)
- *    via reverse-geocoding from NE coordinates (OpenStreetMap Nominatim)
- * 3) Prevents "description showing in location" by keeping location separate
- * 4) Keeps vehicle movement square color based on difficulty (green/yellow/red)
+ *
+ * ✅ Fixes included in this version:
+ * ✅ Single STYLE token system for fonts/spacing/margins (consistent look everywhere)
+ * ✅ Table width matches column widths (prevents stretching/clipping)
+ * ✅ Columns rebalanced: DETAILS reduced, PHOTO widened (full image visible)
+ * ✅ Row height controlled via STYLE tokens so images never get cut
+ * ✅ Photo sizing adjusted for the PHOTO cell width (single vs multi)
+ * ✅ Alignment kept clean (centered headers, consistent cell padding)
  */
 
 import { saveAs } from "file-saver";
+import JSZip from "jszip";
 import {
   AlignmentType,
   BorderStyle,
   Document,
+  ExternalHyperlink,
   Footer,
   Header,
   HeightRule,
   ImageRun,
   Packer,
+  PageNumber,
   PageOrientation,
   Paragraph,
   ShadingType,
@@ -39,20 +44,93 @@ import {
 } from "docx";
 
 /** =========================
+ * ✅ STYLE TOKENS (single source of truth)
+ * ========================= */
+const STYLE = {
+  font: {
+    cell: 28, // ~11pt
+    cellSmall: 28, // ~9pt
+    header: 28, // ~12pt
+    // NOTE: docx TextRun.size is in half-points (pt * 2).
+    // User-required: all section/page titles = 24pt => 48 half-points.
+    sectionTitle: 48,
+    // Cover page title sizes are handled explicitly (46pt / 36pt / 24pt).
+    title: 56, // legacy/unused for cover main title
+    meta: 32, // footer/meta
+  },
+  spacing: {
+    none: { before: 0, after: 0 },
+    cell: { before: 40, after: 40, line: 320 },
+    cellTight: { before: 0, after: 0, line: 276 },
+    section: { before: 120, after: 120, line: 360 },
+    sectionTitle: { before: 120, after: 60 },
+  },
+  cellMargins: { top: 80, bottom: 80, left: 120, right: 120 } as any,
+  row: { height: 3800 },
+  photo: {
+    single: { w: 320, h: 180 },
+    multi: { w: 230, h: 130 },
+  },
+};
+
+
+/** =========================
+ * ✅ Reliable page border patch (matches client reference)
+ * Adds <w:pgBorders ...> to every section in word/document.xml
+ * ========================= */
+// NOTE: Use offsetFrom="page" so borders are always visible on all sides.
+// Content is kept inside the border by using slightly larger page margins.
+const PG_BORDERS_XML =
+  '<w:pgBorders w:offsetFrom="page">' +
+  '<w:top w:val="double" w:sz="6" w:space="48" w:color="FF0000"/>' +
+  '<w:left w:val="double" w:sz="6" w:space="48" w:color="FF0000"/>' +
+  '<w:bottom w:val="double" w:sz="6" w:space="48" w:color="FF0000"/>' +
+  '<w:right w:val="double" w:sz="6" w:space="48" w:color="FF0000"/>' +
+  "</w:pgBorders>";
+
+// ✅ Rounded input box background (PNG) to mimic border-radius in DOCX (Word table cells have no real borderRadius)
+const __ROUNDED_INPUT_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAA4QAAAB4CAYAAACq9jzEAAAEUUlEQVR4nO3dPVLrMBiG0XD3BBUUsHAooIJFQcXMnZDYkiXZjt9z2kxst898+jmdAAAAAAAAAAAAAAAAAIAjulvzZa/vn99rvg8AAOAWvTw9rNJqQ18iAAEAANqNCsQhDxWCAAAA/fUOw64PE4IAAADj9QrDLg8RggAAAOtrDcN/rR8gBgEAALbR2mNNNbnk5c+P9y2vBAAAOLS3j6/q/yydFC76U00ICkAAAIDlagKxNgyrg7A0BoUgAABAP6VhWBOFVUFYEoNCEAAAYJySMCyNwuZDZf4nBgEAAMbq2V3FQTg3HRSDAAAA65jrr9KtfkVjxKmHCUEAAIDtTC0hnVs6OjshdM8gAADAbZrruaY9hKaDAAAA22rpsskgtFQUAABg/6b6bKrrFk0IxSAAAMC+LOm0q0Fo7yAAAMAxXOu76gmh6SAAAMA+1fbaxSA0HQQAADiWS51XNSE0HQQAANi3mm5runYCAACA2yUIAQAAQv0JQvsHAQAAjum894onhPYPAgAA3IbSfrNkFAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUMVB+PbxNfI7AAAA6KS03/4E4cvTw133rwEAAGBz571nySgAAEAoQQgAABCqKgjtIwQAANi3mm67GIT2EQIAABzLpc6rXjJqSggAALBPtb12NQhNCQEAAI7hWt8tOlTGlBAAAGBflnTaZBBOTQlFIQAAwD5M9dlU1zVdOyEKAQAAttXSZbNBaC8hAADAbZrrueLYe33//J76/fnxvvRRAAAANJqbDJYM94qXjM49zPJRAACAdfSIwdOpcQ/hOVEIAAAwVs/uqt4fOLd09JclpAAAAP2UhmDNOTCLDowpjcLTSRgCAAC0qJkI1h4K2nSCaE0Y/hKIAAAA1y1ZErr0dojmKyWWRCEAAAB9tFwV2HyojHsKAQAAttHaY11jzrQQAABgvF6DuSHTPWEIAADQX+8VmkOXewpDAACAdqO26q26/08gAgAAzHNWCwAAAAAAAAAAAACd/ADtkM/Q/w16FgAAAABJRU5ErkJggg==";
+function __roundedInputPngBytes() {
+  return Uint8Array.from(atob(__ROUNDED_INPUT_PNG_BASE64), (c) => c.charCodeAt(0));
+}
+
+
+async function applyRedPageBordersToDocxBytes(input: ArrayBuffer | Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(input as any);
+  const docXmlFile = zip.file("word/document.xml");
+  if (!docXmlFile) {
+    // if structure unexpected, return original bytes
+    const out = input instanceof Uint8Array ? input : new Uint8Array(input);
+    return out;
+  }
+
+  let xml = await docXmlFile.async("string");
+
+  // Remove any existing pgBorders then insert ours into every sectPr
+  xml = xml.replace(/<w:pgBorders[\s\S]*?<\/w:pgBorders>/g, "");
+  xml = xml.replace(/<\/w:sectPr>/g, PG_BORDERS_XML + "</w:sectPr>");
+
+  zip.file("word/document.xml", xml);
+
+  const outBytes = await zip.generateAsync({ type: "uint8array" });
+  return outBytes;
+}
+
+
+/** =========================
  * GPX Types
  * ========================= */
 type GPXPoint = { lat: number; lon: number; time?: string };
-
 function isoUtc(d: Date) {
   return d.toISOString();
 }
 
-/**
+/** =========================
  * Parses strings like:
  * "N28 02.912 E84 48.869"
  * "N28.12345 E84.98765"
  * "N28 02.912\nE84 48.869"
- */
+ * ========================= */
 function parseNEToDecimal(ne: string): { lat: number; lon: number } | null {
   const t = String(ne || "")
     .replace(/\r/g, " ")
@@ -90,16 +168,14 @@ function parseNEToDecimal(ne: string): { lat: number; lon: number } | null {
 }
 
 /** =========================
- * ✅ Reverse Geocode (NE -> readable location)
- * Uses OpenStreetMap Nominatim reverse API
+ * ✅ Reverse Geocode (OSM Nominatim)
  * ========================= */
 const REVERSE_CACHE = new Map<string, string>();
 const REVERSE_INFLIGHT = new Map<string, Promise<string>>();
 const REVERSE_TIMEOUT_MS = 9000;
 
 function coordKey(lat: number, lon: number) {
-  // round to ~100m (reduces repeated calls)
-  const r = (n: number) => Math.round(n * 1000) / 1000;
+  const r = (n: number) => Math.round(n * 1000) / 1000; // ~100m
   return `${r(lat)},${r(lon)}`;
 }
 
@@ -115,14 +191,12 @@ function formatOsmAddress(addr: any) {
   const p1 = pickFirst(addr, ["neighbourhood", "suburb", "quarter", "hamlet"]);
   const p2 = pickFirst(addr, ["city_district", "district", "borough", "county", "state_district"]);
   const p3 = pickFirst(addr, ["city", "town", "village", "municipality"]);
-
   const parts = [p1, p2, p3].filter(Boolean);
 
   if (parts.length < 2) {
     const st = pickFirst(addr, ["state"]);
     if (st) parts.push(st);
   }
-
   return parts.join(", ");
 }
 
@@ -160,7 +234,9 @@ async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
 
       const out =
         (label || "").trim() ||
-        (json?.display_name ? String(json.display_name).split(",").slice(0, 3).join(",").trim() : "");
+        (json?.display_name
+          ? String(json.display_name).split(",").slice(0, 3).join(",").trim()
+          : "");
 
       if (out) REVERSE_CACHE.set(key, out);
       return out || "";
@@ -180,6 +256,21 @@ async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
 /** =========================
  * GPX Generator
  * ========================= */
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 function toGpxXml(params: { name: string; creator?: string; points: GPXPoint[] }) {
   const creator = params.creator || "Recorded in TSPL Web App";
   const name = (params.name || "Export").trim() || "Export";
@@ -243,34 +334,735 @@ ${trkptsXml}
 /** =========================
  * TSPL FORMAT SETTINGS
  * ========================= */
-const TABLE_TOTAL_W = 15848;
-// 11 physical columns (sum = 15848)
-const GRID_COLS = [846, 1134, 1701, 2884, 1085, 906, 1787, 2607, 1111, 676, 1111];
+
+// ✅ IMPORTANT: table width should match the column widths sum (prevents Word stretching & clipping)
+const TABLE_TOTAL_W = 23578;
+
+// ✅ Rebalanced widths (sum = 15848) — PHOTO gets more width; DETAILS reduced
+// Columns: [GPS, KMS, NE, D1, D2, L1, L2, DESC, MOVE, P1, P2, P3]
+const GRID_COLS = [1637, 1934, 2827, 1562, 1562, 1934, 1934, 1785, 1338, 2379, 2379, 2307];
 
 const HEADER_FILL = "365F91";
+const PHOTO_PAGE_HEADER_FILL = "4CAF50";
+const PHOTO_PAGE_ROW_FILL = "D9EAD3";
+
 const PAGE_BORDER_COLOR = "C00000";
 
 const BORDER = { style: BorderStyle.SINGLE, size: 4, color: "BFBFBF" };
 const CELL_BORDERS = { top: BORDER, bottom: BORDER, left: BORDER, right: BORDER };
-const P0 = { before: 0, after: 0 };
+const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+// ✅ Photo cells: remove the two horizontal lines (top/bottom) so images look clean
+const PHOTO_CELL_BORDERS = { top: NO_BORDER, bottom: NO_BORDER, left: BORDER, right: BORDER };
 
 const DEBUG_PHOTOS = false;
 
+// ✅ A4 size (TWIPS)
+const A4_W = 11906;
+const A4_H = 16838;
+
+// ✅ A3 size (TWIPS) (11.69" x 16.54")
+// NOTE: Word uses twips (1 inch = 1440 twips).
+// A3 = 11.69 x 16.54 in  -> 16838 x 23811 twips (commonly used rounded values)
+// We intentionally use A3 for the wide, reference-like landscape pages.
+const A3_W = 16838;
+const A3_H = 23811;
+
+// ✅ Tight margins
+const COVER_MARGIN = {
+  top: 240,
+  bottom: 240,
+  left: 520, right: 520,
+  header: 240,
+  footer: 320,
+  gutter: 0,
+};
+
+const TABLE_MARGIN = {
+  top: 240,
+  bottom: 240,
+  left: 520, right: 520,
+  header: 420,
+  footer: 520,
+  gutter: 0,
+};
+
 /** ✅ Watermark opts */
-export type WatermarkOptions = {
+export type WatermarkOptions = { enabled?: boolean; text?: string };
+
+export type CoverOptions = {
   enabled?: boolean;
-  text?: string;
+  logoUrl?: string;
+  logoWidth?: number;
+  logoHeight?: number;
+  rightTopText?: string;
+  topCenterText?: string;
+  recommendationText?: string;
+  footerLeftText?: string;
+  footerEmail?: string;
+  footerWebsite?: string;
+  datedLabel?: string;
+  date?: string | Date;
 };
 
 export type DownloadOpts = {
   includePhotos?: boolean;
   fileName?: string;
   watermark?: WatermarkOptions;
+  cover?: CoverOptions;
 };
+
+/** =========================
+ * ✅ ROUTE SURVEY (Objective + Route Map + GA Drawing)
+ * Pulls from:
+ *  - project_route_pages (latest)
+ *  - project_route_page_images (latest/first)
+ * ========================= */
+type ProjectRoutePageRow = {
+  id: string;
+  project_id: string;
+  objective?: string | null;
+  map_mode?: string | null; // 'preset' | 'upload'
+  preset_map_key?: string | null; // ex: 'route1.png' OR full url OR '/maps/route1.png'
+  map_file_url?: string | null; // full public url if uploaded
+  created_at?: string | null;
+};
+
+type ProjectRouteImageRow = {
+  id: string;
+  project_id: string;
+  project_page_id: string;
+  file_url: string;
+  created_at?: string | null;
+};
+
+function isHttpUrl(u: string) {
+  return /^https?:\/\//i.test(u);
+}
+
+function resolvePresetMapUrl(presetKey: string) {
+  const t = String(presetKey || "").trim();
+  if (!t) return "";
+  if (isHttpUrl(t) || t.startsWith("data:")) return t;
+  // If you saved only a file name like "route1.png" -> assume /public/maps/
+  if (!t.includes("/")) return `/maps/${t}`;
+  // If you saved "maps/route1.png"
+  if (!t.startsWith("/")) return `/${t}`;
+  return t;
+}
+
+async function getProjectRouteSetup(
+  supabase: any,
+  projectId: string
+): Promise<{ objective: string; routeMapUrl: string; gaImageUrls: string[]; locations: string[] } | null> {
+  const { data: page, error: pErr } = await supabase
+    .from("project_route_pages")
+    .select("id, project_id, objective, map_mode, preset_map_key, map_file_url, created_at")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (pErr) throw pErr;
+  if (!page?.id) return null;
+
+  const pr = page as ProjectRoutePageRow;
+  const routeMapUrl =
+    (pr.map_file_url && String(pr.map_file_url).trim()) ||
+    (pr.preset_map_key ? resolvePresetMapUrl(pr.preset_map_key) : "") ||
+    "";
+
+  const { data: imgs, error: iErr } = await supabase
+    .from("project_route_page_images")
+    .select("id, project_id, project_page_id, file_url, created_at")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: true })
+    .limit(10);
+
+  if (iErr) throw iErr;
+
+  const gaImageUrls = (imgs || [])
+    .map((x: any) => String((x as ProjectRouteImageRow)?.file_url || "").trim())
+    .filter(Boolean);
+
+  // ✅ locations (from project_route_page_locations)
+  // Fetch 4 labels for THIS project (project_id), ordered by sort_order ASC.
+  let locations: string[] = [];
+  const { data: locs, error: lErr } = await supabase
+    .from("project_route_page_locations")
+    .select("label, sort_order")
+    .eq("project_id", projectId)
+    .order("sort_order", { ascending: true })
+    .limit(4);
+
+  if (lErr) throw lErr;
+  locations = (locs || []).map((x: any) => String(x?.label || "").trim()).filter(Boolean);
+
+  return { objective: String(pr.objective || "").trim(), routeMapUrl, gaImageUrls, locations };
+}
+
+function bodyText(text: string) {
+  return new Paragraph({
+    alignment: AlignmentType.LEFT,
+    spacing: STYLE.spacing.section,
+    children: [new TextRun({ text: (text || "—").trim() || "—", size: STYLE.font.cell })],
+  });
+}
+
+function objectiveText(text: string) {
+  return new Paragraph({
+    alignment: AlignmentType.LEFT,
+    spacing: STYLE.spacing.section,
+    // User-required: objective content = 24pt => 48 half-points
+    children: [new TextRun({ text: (text || "—").trim() || "—", size: 48 })],
+  });
+}
+
+function underlineLabel(text: string, size: number = STYLE.font.sectionTitle) {
+  return new Paragraph({
+    alignment: AlignmentType.LEFT,
+    spacing: STYLE.spacing.sectionTitle,
+    children: [
+      new TextRun({
+        text,
+        bold: true,
+        size,
+        underline: { type: UnderlineType.SINGLE },
+      }),
+    ],
+  });
+}
+
+function centeredImage(bytes: Uint8Array, w: number, h: number) {
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 60, after: 120 },
+    children: [new ImageRun({ data: bytes, transformation: { width: w, height: h } })],
+  });
+}
+
+
+
+function getImageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  if (!bytes || bytes.length < 24) return null;
+
+  // PNG: signature + IHDR (width/height at offsets 16/20)
+  const isPng =
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a;
+
+  if (isPng && bytes.length >= 24) {
+    const w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+    const h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+    if (w > 0 && h > 0) return { width: w >>> 0, height: h >>> 0 };
+  }
+
+  // JPEG: scan for SOF marker that contains width/height
+  const isJpg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  if (isJpg) {
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      // Skip fill bytes
+      while (i < bytes.length && bytes[i] === 0xff) i++;
+      if (i >= bytes.length) break;
+      const marker = bytes[i];
+      i++;
+
+      // Standalone markers (no length)
+      if (marker === 0xd8 || marker === 0xd9) continue;
+      if (marker >= 0xd0 && marker <= 0xd7) continue;
+
+      if (i + 1 >= bytes.length) break;
+      const segLen = (bytes[i] << 8) | bytes[i + 1];
+      if (segLen < 2 || i + segLen - 2 >= bytes.length) break;
+
+      const isSOF =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf);
+
+      if (isSOF) {
+        // SOF: [lenHi lenLo][precision][heightHi heightLo][widthHi widthLo]...
+        const p = i + 2;
+        const h = (bytes[p + 1] << 8) | bytes[p + 2];
+        const w = (bytes[p + 3] << 8) | bytes[p + 4];
+        if (w > 0 && h > 0) return { width: w, height: h };
+        break;
+      }
+
+      i += segLen;
+    }
+  }
+
+  return null;
+}
+
+
+function fitTransform(bytes: Uint8Array, maxW: number, maxH: number) {
+  const dim = getImageDimensions(bytes);
+  let w = maxW;
+  let h = maxH;
+
+  if (dim && dim.width > 0 && dim.height > 0) {
+    const scale = Math.min(maxW / dim.width, maxH / dim.height);
+    w = Math.max(1, Math.round(dim.width * scale));
+    h = Math.max(1, Math.round(dim.height * scale));
+  }
+  return { width: w, height: h };
+}
+
+function centeredImageFit(bytes: Uint8Array, maxW: number, maxH: number) {
+  const { width: w, height: h } = fitTransform(bytes, maxW, maxH);
+
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 60, after: 120 },
+    children: [new ImageRun({ data: bytes, transformation: { width: w, height: h } })],
+  });
+}
+
+
+// ✅ Trim large white margins from GA drawings so the actual drawing is centered visually.
+const __TRIM_CACHE = new Map<string, Uint8Array>();
+
+async function trimWhiteMarginsToPng(bytes: Uint8Array): Promise<Uint8Array> {
+  try {
+    const key = `${bytes.length}:${bytes[0]}:${bytes[1]}:${bytes[2]}:${bytes[3]}`;
+    const cached = __TRIM_CACHE.get(key);
+    if (cached) return cached;
+
+    const blob = new Blob([bytes]);
+    const bmp = await createImageBitmap(blob);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(bmp, 0, 0);
+
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = img.data;
+
+    // find bbox of "non-white" pixels
+    let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1;
+
+    const isNonWhite = (r: number, g: number, b: number, a: number) => {
+      if (a < 10) return false; // transparent
+      // treat near-white as background
+      return !(r > 245 && g > 245 && b > 245);
+    };
+
+    for (let y = 0; y < canvas.height; y++) {
+      const row = y * canvas.width * 4;
+      for (let x = 0; x < canvas.width; x++) {
+        const i = row + x * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+        if (isNonWhite(r, g, b, a)) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    // If nothing found, return original
+    if (maxX < 0 || maxY < 0) return bytes;
+
+    // Add small padding so lines aren't clipped
+    const pad = 8;
+    minX = Math.max(0, minX - pad);
+    minY = Math.max(0, minY - pad);
+    maxX = Math.min(canvas.width - 1, maxX + pad);
+    maxY = Math.min(canvas.height - 1, maxY + pad);
+
+    const w = Math.max(1, maxX - minX + 1);
+    const h = Math.max(1, maxY - minY + 1);
+
+    const crop = document.createElement("canvas");
+    crop.width = w;
+    crop.height = h;
+    const c2 = crop.getContext("2d")!;
+    c2.drawImage(canvas, minX, minY, w, h, 0, 0, w, h);
+
+    const pngBlob: Blob = await new Promise((resolve) => crop.toBlob((b) => resolve(b as Blob), "image/png"));
+    const outBytes = new Uint8Array(await pngBlob.arrayBuffer());
+    __TRIM_CACHE.set(key, outBytes);
+    return outBytes;
+  } catch {
+    return bytes;
+  }
+}
+
+async function centeredImageFitTrim(bytes: Uint8Array, maxW: number, maxH: number) {
+  const trimmed = await trimWhiteMarginsToPng(bytes);
+  const { width: w, height: h } = fitTransform(trimmed, maxW, maxH);
+
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 60, after: 120 },
+    children: [new ImageRun({ data: trimmed, transformation: { width: w, height: h } })],
+  });
+}
+
+function sectionPropsA3Landscape() {
+  return {
+    page: {
+      size: { width: A3_W, height: A3_H, orientation: PageOrientation.LANDSCAPE },
+      margin: TABLE_MARGIN as any,
+      ...(pageBordersTSPL() as any),
+    } as any,
+  };
+}
+
+function sectionPropsA4Portrait() {
+  return {
+    page: {
+      size: { width: A4_W, height: A4_H, orientation: PageOrientation.PORTRAIT },
+      margin: TABLE_MARGIN as any,
+      ...(pageBordersTSPL() as any),
+    } as any,
+  };
+}
+
+async function bytesFromUrlForDocx(url: string): Promise<Uint8Array | null> {
+  const u = String(url || "").trim();
+  if (!u) return null;
+  try {
+    return await fetchBytes(u);
+  } catch {
+    return null;
+  }
+}
+
+async function buildObjectiveRouteMapSection(params: {
+  projectName: string;
+  objective: string;
+  routeMapBytes: Uint8Array | null;
+  routeLocations?: string[];
+  footerDate?: string | Date;
+}) {
+  const { projectName, objective, routeMapBytes, routeLocations, footerDate } = params;
+
+  const children: Paragraph[] = [];
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 0, after: 120 },
+      children: [
+        new TextRun({
+          text: String(projectName || "").toUpperCase(),
+          bold: true,
+          size: STYLE.font.sectionTitle,
+          color: "667085",
+        }),
+      ],
+    })
+  );
+
+  // User-required: OBJECTIVE label = 24pt => 48 half-points
+  children.push(underlineLabel("OBJECTIVE:", 48));
+  children.push(objectiveText(objective || "—"));
+
+  // User-required: ROUTE MAP label = 24pt => 48 half-points
+  children.push(underlineLabel("ROUTE MAP:", 48));
+  children.push(new Paragraph({ spacing: { before: 0, after: 0 }, text: "" }));
+
+if (routeMapBytes) {
+    // ✅ Route Map page layout like screenshot:
+    // Left: 4 location boxes, Right: large map image
+    const locs = (routeLocations || []).slice(0, 4);
+    while (locs.length < 4) locs.push("");
+
+    const leftRows = locs.map((label, idx) => {
+      const iconText = idx === 3 ? "📍" : "○";
+      const iconColor = idx === 3 ? "B42318" : "101828";
+
+      return new TableRow({
+        cantSplit: true,
+        children: [
+          new TableCell({
+            width: { size: 12, type: WidthType.PERCENTAGE },
+            margins: { top: 90, bottom: 90, left: 120, right: 120 } as any,
+            verticalAlign: VerticalAlign.CENTER,
+            borders: {
+              top: { style: BorderStyle.NONE },
+              bottom: { style: BorderStyle.NONE },
+              left: { style: BorderStyle.NONE },
+              right: { style: BorderStyle.NONE },
+            },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                children: [new TextRun({ text: iconText, size: 36, color: iconColor, bold: true })],
+              }),
+            ],
+          }),
+          new TableCell({
+            width: { size: 88, type: WidthType.PERCENTAGE },
+            margins: { top: 90, bottom: 90, left: 220, right: 220 } as any,
+            verticalAlign: VerticalAlign.CENTER,
+            borders: {
+              top: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+              bottom: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+              left: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+              right: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+            },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                children: [
+                  new TextRun({
+                    text: (label || "").trim() || " ",
+                    size: 32,
+                    color: "101828",
+                    bold: true,
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      });
+    });
+
+    const leftPanel = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      layout: TableLayoutType.FIXED,
+      rows: leftRows,
+    });
+
+    const mapImgPara = centeredImageFit(routeMapBytes, 920, 650);
+
+    const layoutTable = new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      layout: TableLayoutType.FIXED,
+      rows: [
+        new TableRow({
+          cantSplit: true,
+          children: [
+            new TableCell({
+              width: { size: 30, type: WidthType.PERCENTAGE },
+              margins: { top: 0, bottom: 0, left: 0, right: 200 } as any,
+              verticalAlign: VerticalAlign.TOP,
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE },
+              },
+              children: [leftPanel],
+            }),
+            new TableCell({
+              width: { size: 70, type: WidthType.PERCENTAGE },
+              margins: { top: 0, bottom: 0, left: 200, right: 0 } as any,
+              verticalAlign: VerticalAlign.TOP,
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE },
+              },
+              children: [mapImgPara],
+            }),
+          ],
+        }),
+      ],
+    });
+
+    // Table needs to be pushed into section children
+    (children as any).push(layoutTable);
+  } else {
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 40, after: 120 },
+        children: [
+          new TextRun({
+            text: "Route map not available.",
+            size: STYLE.font.cell,
+            color: "B42318",
+            bold: true,
+          }),
+        ],
+      })
+    );
+  }
+
+  return {
+    properties: sectionPropsA3Landscape(),
+    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+    children,
+  };
+}
+
+/**
+ * GA Drawing can have multiple images. We render ALL images.
+ * - If 1 image: single page
+ * - If multiple: one image per page (prevents overflow and page-splitting issues)
+ */
+async function buildGADrawingSections(params: {
+  projectName: string;
+  gaDrawingBytesList: Uint8Array[];
+  footerDate?: string | Date;
+}) {
+  const { projectName, gaDrawingBytesList, footerDate } = params;
+
+  const list = (gaDrawingBytesList || []).filter((b) => !!b);
+
+  // If nothing, return a single "not available" section.
+  if (list.length === 0) {
+    const children: Paragraph[] = [];
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 0, after: 120 },
+        children: [
+          new TextRun({
+            text: String(projectName || "").toUpperCase(),
+            bold: true,
+            size: STYLE.font.sectionTitle,
+            color: "667085",
+          }),
+        ],
+      })
+    );
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: STYLE.spacing.sectionTitle,
+        children: [
+          new TextRun({
+            text: "GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD:",
+            bold: true,
+            size: 48,
+          }),
+        ],
+      })
+    );
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 40, after: 120 },
+        children: [
+          new TextRun({
+            text: "GA drawing not available.",
+            size: STYLE.font.cell,
+            color: "B42318",
+            bold: true,
+          }),
+        ],
+      })
+    );
+    return [
+      {
+        properties: { ...(sectionPropsA3Landscape() as any) } as any,
+        footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+        children,
+      },
+    ];
+  }
+
+  // One image per page
+  return await Promise.all(list.map(async (bytes, idx) => {
+    const children: Paragraph[] = [];
+
+    // Body: keep the drawing image position EXACTLY as before.
+    // We add invisible placeholders (same spacing/size as the original title block)
+    // so the drawing does NOT jump upward, while the visible titles stay in the header.
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 0, after: 120 },
+        children: [
+          new TextRun({
+            text: String(projectName || "").toUpperCase() || " ",
+            bold: true,
+            size: STYLE.font.sectionTitle,
+            color: "FFFFFF",
+          }),
+        ],
+      })
+    );
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: STYLE.spacing.sectionTitle,
+        children: [
+          new TextRun({
+            text: "GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD:",
+            bold: true,
+            // Match 24pt title height (invisible placeholder)
+            size: 48,
+            color: "FFFFFF",
+          }),
+        ],
+      })
+    );
+
+    children.push(await centeredImageFitTrim(bytes, 1050, 650));
+
+    return {
+      // ✅ Keep original GA layout behavior: image/content stays vertically centered on the page.
+      // We only move the visible titles to the header (see buildGATitleHeader usage),
+      // and keep invisible placeholders in the body to preserve the same drawing position.
+      properties: { ...(sectionPropsA3Landscape() as any), verticalAlign: VerticalAlign.CENTER } as any,
+      footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+      children,
+    };
+  }));
+}
 
 /** =========================
  * DB Types
  * ========================= */
+
+async function fetchProjectAndLocations4(supabase: any, projectId: string): Promise<{ projectName: string; locs: [string,string,string,string]; debug: string }> {
+  if (!projectId) return { projectName: "", locs: ["", "", "", ""] };
+
+  // ✅ "Join" step 1: confirm project row (projects.id) and get its name (or title/project_name)
+  const { data: pRow, error: pErr } = await supabase
+    .from("projects")
+    .select("id, name, title, project_name")
+    .eq("id", projectId)
+    .maybeSingle();
+
+  if (pErr) throw pErr;
+  const pid = pRow?.id || projectId;
+  const projectName = String(pRow?.name || pRow?.title || pRow?.project_name || "").trim();
+
+  // ✅ "Join" step 2: fetch locations for that project_id
+  const { data: rows, error: lErr } = await supabase
+    .from("project_route_page_locations")
+    .select("label, sort_order")
+    .eq("project_id", pid)
+    .order("sort_order", { ascending: true })
+    .limit(4);
+
+  if (lErr) throw lErr;
+
+  const labels = (rows || []).map((r: any) => String(r?.label || "").trim());
+  const locs: [string, string, string, string] = [
+    labels[0] || "",
+    labels[1] || "",
+    labels[2] || "",
+    labels[3] || "",
+  ];
+
+  const debug = `projectId=${pid} name=${projectName || '-'} locs=${locs.join(' | ')}`;
+  return { projectName, locs, debug };
+}
+
 type VehicleMovement = "green" | "yellow" | "red" | "";
 
 type ProjectRow = {
@@ -287,20 +1079,23 @@ type ReportRow = {
   route_id?: string | null;
   category?: string | null;
   description?: string | null;
-  difficulty?: string | null; // ✅ correct column
+  difficulty?: string | null;
 };
 
-/** =========================
- * Point Normalization
- * ========================= */
 type NormalizedPoint = {
   gps_no: string;
   kms: string;
   ne_coordinate: string;
+
   details: string;
-  location: string; // will be replaced by reverse-geocode if coords exist
-  photo_refs: string[];
+  location: string;
+
+  description: string;
   movement: VehicleMovement;
+
+  photo_refs: string[];
+  photo_description: string;
+
   __lat?: number | null;
   __lon?: number | null;
 };
@@ -326,15 +1121,18 @@ function normalizeMovement(v: any): VehicleMovement {
   return "";
 }
 
-/** Red TSPL page border */
+/** =========================
+ * ✅ PAGE BORDER (tight to edge)
+ * ========================= */
 function pageBordersTSPL(): any {
+  const b = { style: BorderStyle.SINGLE, size: 10, color: PAGE_BORDER_COLOR, space: 0 };
   return {
     borders: {
       pageBorders: {
-        top: { style: BorderStyle.DOUBLE, size: 4, color: PAGE_BORDER_COLOR, space: 24 },
-        left: { style: BorderStyle.DOUBLE, size: 4, color: PAGE_BORDER_COLOR, space: 24 },
-        bottom: { style: BorderStyle.DOUBLE, size: 4, color: PAGE_BORDER_COLOR, space: 24 },
-        right: { style: BorderStyle.DOUBLE, size: 4, color: PAGE_BORDER_COLOR, space: 24 },
+        top: b,
+        left: b,
+        bottom: b,
+        right: b,
       },
     },
   };
@@ -343,60 +1141,412 @@ function pageBordersTSPL(): any {
 /** =========================
  * Text helpers
  * ========================= */
-function run(text: string, opts?: { bold?: boolean; color?: string; size?: number; underline?: boolean }) {
+function run(
+  text: string,
+  opts?: { bold?: boolean; color?: string; size?: number; underline?: boolean }
+) {
   return new TextRun({
     text,
     bold: opts?.bold,
     color: opts?.color,
     underline: opts?.underline ? { type: UnderlineType.SINGLE } : undefined,
-    size: opts?.size ?? 24,
+    size: opts?.size ?? STYLE.font.cell,
   });
 }
 
-function paragraphPlain(text: string, align: AlignmentType) {
+function paragraphPlain(text: string, align: AlignmentType, spacing?: any, size?: number) {
   return new Paragraph({
     alignment: align,
-    spacing: P0,
-    children: [run(text)],
+    spacing: spacing ?? STYLE.spacing.cell,
+    children: [new TextRun({ text: text || "—", size: size ?? STYLE.font.cell })],
   });
 }
 
 function paragraphFromLine(line: string) {
   const t = (line ?? "").toString().trimEnd();
   const isBullet = t.trim().startsWith("•") || t.trim().startsWith("-") || t.trim().startsWith("• ");
-
   if (!isBullet) return paragraphPlain(t, AlignmentType.LEFT);
 
   const normalized = t.trim().startsWith("-") ? `• ${t.trim().slice(1).trim()}` : t.trim();
 
   return new Paragraph({
     alignment: AlignmentType.LEFT,
-    spacing: P0,
+    spacing: STYLE.spacing.cell,
     indent: { left: 360, hanging: 180 },
-    children: [run(normalized)],
+    children: [new TextRun({ text: normalized, size: STYLE.font.cell })],
   });
 }
 
 function splitLines(text: string) {
   const lines = (text || "").toString().split("\n").map((x) => x.trimEnd());
   const filtered = lines.filter((x) => x.length > 0);
-  return filtered.length ? filtered : [""];
+  return filtered.length ? filtered : ["—"];
 }
 
 /** =========================
- * ✅ WATERMARK
+ * ✅ DETAILS ICONS
  * ========================= */
-function splitWatermarkText(full: string): { left: string; right: string } {
-  const t = String(full || "").trim();
-  const idx = t.indexOf(":");
-  if (idx !== -1) {
-    const left = t.slice(0, idx + 1);
-    const right = t.slice(idx + 1).trim();
-    return { left: left.trim(), right: right };
-  }
-  return { left: "CONFIDENTIAL REPORT:", right: t };
+const DETAILS_ICON_CACHE = new Map<string, Uint8Array>();
+
+function normKey(x: string) {
+  return String(x || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 }
 
+function detectDetailKind(details: string) {
+  const t = normKey(details);
+
+  if (t.includes("footpath bridge")) return "footpath_bridge";
+  if (t === "bridge" || t.includes(" bridge")) return "bridge";
+  if (t.includes("underpass bridge") || t.includes("underpass")) return "underpass";
+
+  if (t.includes("low tension")) return "lt_cable";
+  if (t.includes("high tension")) return "ht_cable";
+  if (t.includes("towerline cable")) return "towerline_cable";
+  if (t === "towerline" || t.includes("towerline")) return "towerline";
+
+  if (t.includes("junction left")) return "junction_left";
+  if (t.includes("junction right")) return "junction_right";
+  if (t.includes("turn left")) return "junction_left";
+  if (t.includes("turn right")) return "junction_right";
+  if (t === "bend" || t.includes("bend")) return "bend";
+  if (t.includes("take diversion") || t.includes("diversion")) return "diversion";
+
+  if (t.includes("tree branches") || t.includes("tree")) return "tree";
+  if (t.includes("petrol bunk")) return "petrol";
+  if (t.includes("electric sign board")) return "electric_sign";
+  if (t.includes("signboard") || t.includes("sign board")) return "signboard";
+  if (t.includes("camera pole") || t.includes("camera")) return "camera_pole";
+  if (t.includes("toll plaza") || t.includes("toll")) return "toll";
+
+  return "";
+}
+
+async function iconPngBytes(kind: string, sizePx = 34): Promise<Uint8Array | null> {
+  const key = `${kind}:${sizePx}`;
+  if (DETAILS_ICON_CACHE.has(key)) return DETAILS_ICON_CACHE.get(key)!;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = sizePx;
+  canvas.height = sizePx;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, sizePx, sizePx);
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#111111";
+  ctx.fillStyle = "#111111";
+
+  const S = sizePx;
+  const pad = Math.max(3, Math.round(S * 0.12));
+  const mid = S / 2;
+
+  // ✅ helper used by drawBridge()
+  function rect(x: number, y: number, w: number, h: number, fill = true) {
+    if (fill) ctx.fillRect(x, y, w, h);
+    else ctx.strokeRect(x, y, w, h);
+  }
+
+  function drawArrow(dir: "left" | "right") {
+    ctx.lineWidth = Math.max(3, Math.round(S * 0.12));
+    ctx.beginPath();
+    if (dir === "right") {
+      ctx.moveTo(pad, mid);
+      ctx.lineTo(S - pad * 1.6, mid);
+    } else {
+      ctx.moveTo(S - pad, mid);
+      ctx.lineTo(pad * 1.6, mid);
+    }
+    ctx.stroke();
+
+    ctx.beginPath();
+    if (dir === "right") {
+      ctx.moveTo(S - pad * 1.8, mid - pad);
+      ctx.lineTo(S - pad * 1.0, mid);
+      ctx.lineTo(S - pad * 1.8, mid + pad);
+    } else {
+      ctx.moveTo(pad * 1.8, mid - pad);
+      ctx.lineTo(pad * 1.0, mid);
+      ctx.lineTo(pad * 1.8, mid + pad);
+    }
+    ctx.stroke();
+  }
+
+  // ✅ Footpath Bridge icon (deck + supports) — used only for "footpath_bridge"
+  
+  function drawBridge() {
+    // Simple arch bridge icon (separate from footpath bridge)
+    const deckY = pad + Math.round(S * 0.46);
+    const deckH = Math.max(3, Math.round(S * 0.10));
+    rect(pad + Math.round(S * 0.10), deckY, S - Math.round(S * 0.20), deckH, true);
+
+    const archTop = deckY - Math.round(S * 0.18);
+    const left = pad + Math.round(S * 0.16);
+    const right = pad + S - Math.round(S * 0.16);
+    rect(left, archTop, right - left, Math.max(2, Math.round(S * 0.06)), true);
+
+    const legW = Math.max(2, Math.round(S * 0.06));
+    const legH = Math.max(6, Math.round(S * 0.22));
+    const legY = deckY + deckH;
+    rect(pad + Math.round(S * 0.22), legY, legW, legH, true);
+    rect(pad + Math.round(S * 0.72), legY, legW, legH, true);
+  }
+
+
+  function drawFootpathBridge() {
+    // Deck
+    const deckY = pad + Math.round(S * 0.28);
+    const deckH = Math.max(3, Math.round(S * 0.14));
+    ctx.fillRect(pad, deckY, S - pad * 2, deckH);
+
+    // Rail (thin top line)
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.05));
+    ctx.beginPath();
+    ctx.moveTo(pad, deckY);
+    ctx.lineTo(S - pad, deckY);
+    ctx.stroke();
+
+    // Supports / legs
+    const legTop = deckY + deckH;
+    const legBottom = S - pad;
+    const legs = 5;
+    for (let k = 0; k < legs; k++) {
+      const x = pad + Math.round(((S - pad * 2) * k) / (legs - 1));
+      ctx.beginPath();
+      ctx.moveTo(x, legTop);
+      ctx.lineTo(x, legBottom);
+      ctx.stroke();
+    }
+
+    // Ground line
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.05));
+    ctx.beginPath();
+    ctx.moveTo(pad, legBottom);
+    ctx.lineTo(S - pad, legBottom);
+    ctx.stroke();
+  }
+
+
+  function drawUnderpass() {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.10));
+    ctx.beginPath();
+    ctx.moveTo(pad, S - pad);
+    ctx.lineTo(S - pad, S - pad);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(mid, S - pad, S * 0.28, Math.PI, 0, false);
+    ctx.stroke();
+  }
+
+  function drawCable(label: string) {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.10));
+    ctx.beginPath();
+    ctx.moveTo(pad, S * 0.35);
+    ctx.quadraticCurveTo(mid, S * 0.12, S - pad, S * 0.35);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(pad, S * 0.35, Math.max(2, Math.round(S * 0.06)), 0, Math.PI * 2);
+    ctx.arc(S - pad, S * 0.35, Math.max(2, Math.round(S * 0.06)), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.font = `700 ${Math.round(S * 0.34)}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, mid, S * 0.72);
+  }
+
+  function drawTower() {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
+    ctx.beginPath();
+    ctx.moveTo(mid, pad);
+    ctx.lineTo(S - pad, S - pad);
+    ctx.lineTo(pad, S - pad);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(pad * 1.6, S * 0.62);
+    ctx.lineTo(S - pad * 1.6, S * 0.62);
+    ctx.moveTo(pad * 2.3, S * 0.78);
+    ctx.lineTo(S - pad * 2.3, S * 0.78);
+    ctx.stroke();
+  }
+
+  function drawDiversion() {
+    ctx.lineWidth = Math.max(3, Math.round(S * 0.10));
+    ctx.beginPath();
+    ctx.moveTo(mid, S - pad);
+    ctx.lineTo(mid, pad * 1.8);
+    ctx.lineTo(S - pad * 1.6, pad * 1.8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(S - pad * 1.8, pad * 1.8 - pad);
+    ctx.lineTo(S - pad * 1.0, pad * 1.8);
+    ctx.lineTo(S - pad * 1.8, pad * 1.8 + pad);
+    ctx.stroke();
+  }
+
+  function drawTree() {
+    ctx.fillRect(mid - Math.round(S * 0.06), Math.round(S * 0.45), Math.round(S * 0.12), Math.round(S * 0.40));
+    ctx.beginPath();
+    ctx.arc(mid, Math.round(S * 0.35), Math.round(S * 0.22), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(mid - Math.round(S * 0.16), Math.round(S * 0.40), Math.round(S * 0.16), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(mid + Math.round(S * 0.16), Math.round(S * 0.40), Math.round(S * 0.16), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPetrol() {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
+    const x = pad * 1.2;
+    const y = pad * 1.6;
+    const w = Math.round(S * 0.45);
+    const h = Math.round(S * 0.65);
+    ctx.strokeRect(x, y, w, h);
+    ctx.beginPath();
+    ctx.moveTo(x + w, y + Math.round(h * 0.25));
+    ctx.lineTo(x + w + Math.round(S * 0.18), y + Math.round(h * 0.18));
+    ctx.lineTo(x + w + Math.round(S * 0.22), y + Math.round(h * 0.32));
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + w + Math.round(S * 0.18), y + Math.round(h * 0.18));
+    ctx.quadraticCurveTo(S - pad, mid, S - pad * 1.2, S - pad * 1.2);
+    ctx.stroke();
+  }
+
+  function drawSign(isElectric: boolean) {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
+    ctx.beginPath();
+    ctx.moveTo(mid, Math.round(S * 0.35));
+    ctx.lineTo(mid, S - pad);
+    ctx.stroke();
+    const bw = Math.round(S * 0.60);
+    const bh = Math.round(S * 0.30);
+    const bx = mid - bw / 2;
+    const by = pad;
+    ctx.strokeRect(bx, by, bw, bh);
+    if (isElectric) {
+      ctx.beginPath();
+      ctx.moveTo(mid - 4, by + 6);
+      ctx.lineTo(mid + 2, by + 14);
+      ctx.lineTo(mid - 2, by + 14);
+      ctx.lineTo(mid + 4, by + 24);
+      ctx.stroke();
+    }
+  }
+
+  function drawCameraPole() {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
+    ctx.beginPath();
+    ctx.moveTo(mid, pad);
+    ctx.lineTo(mid, S - pad);
+    ctx.stroke();
+    const cw = Math.round(S * 0.35);
+    const ch = Math.round(S * 0.20);
+    ctx.strokeRect(mid, Math.round(S * 0.22), cw, ch);
+    ctx.beginPath();
+    ctx.arc(mid + Math.round(cw * 0.75), Math.round(S * 0.32), Math.round(S * 0.05), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function drawToll() {
+    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
+    ctx.fillRect(pad, pad, S - pad * 2, Math.round(S * 0.18));
+    const by = pad + Math.round(S * 0.22);
+    const bw = Math.round(S * 0.22);
+    const gap = Math.round(S * 0.06);
+    for (let i = 0; i < 3; i++) {
+      const bx = pad + i * (bw + gap);
+      ctx.strokeRect(bx, by, bw, Math.round(S * 0.55));
+    }
+  }
+
+  function drawBend() {
+    ctx.lineWidth = Math.max(3, Math.round(S * 0.12));
+    ctx.beginPath();
+    ctx.moveTo(pad * 1.6, S - pad * 1.6);
+    ctx.quadraticCurveTo(mid, mid, S - pad * 1.6, pad * 1.6);
+    ctx.stroke();
+  }
+
+  switch (kind) {
+    case "footpath_bridge":
+      drawFootpathBridge();
+      break;
+    case "bridge":
+      drawBridge();
+      break;
+    case "underpass":
+      drawUnderpass();
+      break;
+    case "lt_cable":
+      drawCable("LT");
+      break;
+    case "ht_cable":
+      drawCable("HT");
+      break;
+    case "towerline_cable":
+      drawCable("TL");
+      break;
+    case "towerline":
+      drawTower();
+      break;
+    case "diversion":
+      drawDiversion();
+      break;
+    case "junction_left":
+      drawArrow("left");
+      break;
+    case "junction_right":
+      drawArrow("right");
+      break;
+    case "bend":
+      drawBend();
+      break;
+    case "tree":
+      drawTree();
+      break;
+    case "petrol":
+      drawPetrol();
+      break;
+    case "signboard":
+      drawSign(false);
+      break;
+    case "electric_sign":
+      drawSign(true);
+      break;
+    case "camera_pole":
+      drawCameraPole();
+      break;
+    case "toll":
+      drawToll();
+      break;
+    default:
+      return null;
+  }
+
+  ctx.restore();
+
+  const base64 = canvas.toDataURL("image/png").split(",")[1];
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+  DETAILS_ICON_CACHE.set(key, bytes);
+  return bytes;
+}
+
+/** =========================
+ * ✅ Watermark (diagonal)
+ * ========================= */
 async function watermarkPngBytesDiagonal(text: string) {
   const W = 1600;
   const H = 900;
@@ -424,52 +1574,360 @@ async function watermarkPngBytesDiagonal(text: string) {
   return bytes;
 }
 
-async function buildHeaderWithDiagonalWatermark(wmText: string) {
-  const bytes = await watermarkPngBytesDiagonal("CONFIDENTIAL");
+async function buildHeaderWithDiagonalWatermark() {
+  // Watermark removed per requirement
+  return new Header({ children: [] });
+}
 
-  const watermarkImage = new ImageRun({
-    data: bytes,
-    transformation: { width: 900, height: 520 },
-    floating: {
-      horizontalPosition: {
-        relative: HorizontalPositionRelativeFrom.PAGE,
-        align: HorizontalPositionAlign.CENTER,
-      },
-      verticalPosition: {
-        relative: VerticalPositionRelativeFrom.PAGE,
-        align: VerticalPositionAlign.CENTER,
-      },
-      wrap: { type: TextWrappingType.NONE },
-      behindDocument: true,
-      allowOverlap: true,
-      layoutInCell: true,
-    },
+
+/** =========================
+ * Footers
+ * ========================= */
+function formatDDMMYYYY(input?: string | Date) {
+  const d = input ? new Date(input) : new Date();
+  if (Number.isNaN(d.getTime())) return formatDDMMYYYY(new Date());
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(d.getFullYear());
+  return `${dd}.${mm}.${yyyy}`;
+}
+
+function formatDDMMYYYY_DASH(input?: string | Date) {
+  const d = input ? new Date(input) : new Date();
+  if (Number.isNaN(d.getTime())) return formatDDMMYYYY_DASH(new Date());
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(d.getFullYear());
+  return `${dd}-${mm}-${yyyy}`;
+}
+
+function buildFooterTablePages(date?: string | Date) {
+  const dateStr = formatDDMMYYYY(date);
+  const siteText = "raceinnovations.in";
+  const siteUrl = "https://raceinnovations.in";
+
+  const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+
+  const row = new TableRow({
+    children: [
+      new TableCell({
+        width: { size: 33, type: WidthType.PERCENTAGE },
+        borders: { top: none, left: none, right: none, bottom: none },
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            spacing: STYLE.spacing.none,
+            children: [new TextRun({ text: `Date : ${dateStr}`, size: STYLE.font.meta })],
+          }),
+        ],
+      }),
+      new TableCell({
+        width: { size: 34, type: WidthType.PERCENTAGE },
+        borders: { top: none, left: none, right: none, bottom: none },
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: STYLE.spacing.none,
+            children: [
+              new TextRun({ text: "CONFIDENTIAL ", bold: true, size: STYLE.font.meta }),
+              new ExternalHyperlink({
+                link: siteUrl,
+                children: [
+                  new TextRun({
+                    text: siteText,
+                    size: STYLE.font.meta,
+                    color: "0000FF",
+                    underline: { type: UnderlineType.SINGLE },
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+      new TableCell({
+        width: { size: 33, type: WidthType.PERCENTAGE },
+        borders: { top: none, left: none, right: none, bottom: none },
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.RIGHT,
+            spacing: STYLE.spacing.none,
+            children: [new TextRun({ children: ["PAGE NO. ", PageNumber.CURRENT], size: STYLE.font.meta })],
+          }),
+        ],
+      }),
+    ],
   });
 
-  return new Header({
+  return new Footer({
     children: [
-      new Paragraph({
-        spacing: P0,
-        children: [watermarkImage],
+      new Table({
+        layout: TableLayoutType.FIXED,
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [row],
       }),
     ],
   });
 }
 
-function buildFooterExactLikeImage(wmText: string) {
-  const { left, right } = splitWatermarkText(wmText);
-
-  const red = "FF6B6B";
-  const blue = "3B5BFF";
+function buildCoverFooter(opts: CoverOptions) {
+  const leftText = opts.footerLeftText ?? "Report by RACE Innovations Pvt ltd";
+  const email = opts.footerEmail ?? "kh@raceinnovations.in";
+  const website = opts.footerWebsite ?? "https://raceinnovations.in/";
+  const datedLabel = opts.datedLabel ?? "Dated";
+  const dated = formatDDMMYYYY_DASH(opts.date);
 
   return new Footer({
     children: [
       new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { before: 60, after: 0 },
+        alignment: AlignmentType.LEFT,
+        spacing: STYLE.spacing.none,
+        tabStops: [{ type: "right", position: 12500 }],
         children: [
-          run(left ? `${left} ` : "CONFIDENTIAL REPORT: ", { color: red, size: 22 }),
-          run(right || "RACE Innovations Pvt ltd.", { color: blue, underline: true, size: 22 }),
+          run(`${leftText} | `, { size: STYLE.font.meta }),
+          run(`email at `, { size: STYLE.font.meta }),
+          run(email, { size: STYLE.font.meta, color: "0563C1", underline: true }),
+          run(`  |  `, { size: STYLE.font.meta }),
+          new ExternalHyperlink({
+            link: website.startsWith("http") ? website : `https://${website.replace(/^\/+/, "")}`,
+            children: [
+              new TextRun({
+                text: website,
+                size: STYLE.font.meta,
+                color: "0563C1",
+                underline: { type: UnderlineType.SINGLE },
+              }),
+            ],
+          }),
+          run(`\t${datedLabel} ${dated}`, { size: STYLE.font.meta, color: "808080" }),
+        ],
+      }),
+    ],
+  });
+}
+
+
+// Logo-only paragraph used in headers/cover. Keep height modest to avoid a "stretched" look.
+async function coverLogoOnly(logoUrl?: string, w = 390, h = 68) {
+  // NOTE: In Next.js, assets under /public are served from the site root.
+  // Many projects store this logo at /public/images/logo_v2.png (NOT /public/logo_v2.png).
+  // To prevent "logo not showing" due to an incorrect path, try a small set of candidates.
+  const raw = String(logoUrl || "").trim();
+  const candidates = [
+    raw,
+    raw || "/images/logo_v2.png",
+    raw || "/logo_v2.png",
+  ].filter(Boolean) as string[];
+
+  const toAbs = (u0: string) =>
+    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+
+  let bytes: Uint8Array | null = null;
+  for (const c of candidates) {
+    bytes = await bytesFromUrlForDocx(toAbs(c));
+    if (bytes) break;
+  }
+  if (!bytes) {
+    // Logo requested, but not available. Do NOT render fallback text.
+    return new Paragraph({ alignment: AlignmentType.LEFT, spacing: STYLE.spacing.none, text: "" });
+  }
+  return new Paragraph({
+    alignment: AlignmentType.LEFT,
+    spacing: { before: 0, after: 0 },
+    children: [new ImageRun({ data: bytes, transformation: { width: w, height: h } })],
+  });
+}
+
+
+async function buildLogoOnlyHeader(logoUrl?: string, w = 330, h = 58) {
+  const raw = String(logoUrl || "").trim();
+  const candidates = [raw, raw || "/images/logo_v2.png", raw || "/logo_v2.png"].filter(Boolean) as string[];
+  const toAbs = (u0: string) =>
+    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+
+  let bytes: Uint8Array | null = null;
+  for (const c of candidates) {
+    bytes = await bytesFromUrlForDocx(toAbs(c));
+    if (bytes) break;
+  }
+  if (!bytes) return new Header({ children: [] });
+
+  return new Header({
+    children: [
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 0, after: 0 },
+        children: [new ImageRun({ data: bytes, transformation: { width: w, height: h } })],
+      }),
+    ],
+  });
+}
+
+// ✅ GA header: logo + titles at top (keeps page body content unchanged)
+async function buildGATitleHeader(params: {
+  logoUrl?: string;
+  projectName: string;
+  includeGATitle?: boolean;
+  logoW?: number;
+  logoH?: number;
+}) {
+  const { logoUrl, projectName, includeGATitle = true, logoW = 220, logoH = 38 } = params;
+
+  const raw = String(logoUrl || "").trim();
+  const candidates = [raw, raw || "/images/logo_v2.png", raw || "/logo_v2.png"].filter(Boolean) as string[];
+  const toAbs = (u0: string) =>
+    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+
+  let bytes: Uint8Array | null = null;
+  for (const c of candidates) {
+    bytes = await bytesFromUrlForDocx(toAbs(c));
+    if (bytes) break;
+  }
+
+  const children: Paragraph[] = [];
+
+  if (bytes) {
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 0, after: 20 },
+        children: [new ImageRun({ data: bytes, transformation: { width: logoW, height: logoH } })],
+      })
+    );
+  }
+
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { before: 0, after: includeGATitle ? 40 : 0 },
+      children: [
+        new TextRun({
+          text: String(projectName || "").toUpperCase(),
+          bold: true,
+          size: STYLE.font.sectionTitle,
+          color: "667085",
+        }),
+      ],
+    })
+  );
+
+  if (includeGATitle) {
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 0, after: 0 },
+        children: [
+          new TextRun({
+            text: "GA DRAWING FOR 50 FEET TRAILER WITHOUT LOAD:",
+            bold: true,
+            // User-required: page title = 24pt => 48 half-points
+            size: 48,
+          }),
+        ],
+      })
+    );
+  }
+
+  return new Header({ children });
+}
+
+
+/** =========================
+ * Cover helpers
+ * ========================= */
+async function coverTopRowLogo(cover: CoverOptions, centerText: string) {
+  const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+
+  // Left: Logo (image)
+  const logoPara = await coverLogoOnly(cover.logoUrl, cover.logoWidth ?? 320, cover.logoHeight ?? 55);
+
+  return new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        height: { value: 900, rule: HeightRule.ATLEAST },
+        children: [
+          new TableCell({
+            width: { size: 33, type: WidthType.PERCENTAGE },
+            borders: { top: none, bottom: none, left: none, right: none },
+            margins: { top: 0, bottom: 0, left: 0, right: 0 },
+            verticalAlign: VerticalAlign.TOP,
+            children: [logoPara],
+          }),
+          new TableCell({
+            width: { size: 34, type: WidthType.PERCENTAGE },
+            borders: { top: none, bottom: none, left: none, right: none },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: STYLE.spacing.none,
+                children: [new TextRun({ text: String(centerText || "").toUpperCase(), size: 32, color: "1F4E79" })],
+              }),
+            ],
+          }),
+          // Right: EMPTY (CI CHANNEL'S INDIA removed)
+          new TableCell({
+            width: { size: 33, type: WidthType.PERCENTAGE },
+            borders: { top: none, bottom: none, left: none, right: none },
+            children: [new Paragraph({ spacing: STYLE.spacing.none, text: "" })],
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+async function buildCoverHeader(cover: CoverOptions, centerText: string) {
+  const table = await coverTopRowLogo(cover, centerText);
+  return new Header({ children: [table] });
+}
+
+
+function coverLine(color = "1F4E79") {
+  return new Paragraph({
+    spacing: { before: 180, after: 180 },
+    border: { bottom: { style: BorderStyle.SINGLE, size: 6, color } },
+  } as any);
+}
+
+function coverTitleProject(projectName: string) {
+  const t = String(projectName || "").trim() || "PROJECT";
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    // Keep the cover title visually tight (reference uses compact vertical rhythm)
+    spacing: { before: 0, after: 120, line: 520 },
+    // User-required: Center title (CBE) = 36pt => 72 half-points
+    children: [new TextRun({ text: t.toUpperCase(), bold: true, size: 72, color: "1F3A5F" })],
+  });
+}
+
+function coverRecommendationBox(text: string) {
+  return new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 62, type: WidthType.PERCENTAGE },
+    alignment: AlignmentType.CENTER as any,
+    indent: { size: 0, type: WidthType.DXA } as any,
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            shading: { type: ShadingType.CLEAR, fill: "FFFFFF" },
+            borders: {
+              top: { style: BorderStyle.SINGLE, size: 10, color: "1F4E79" },
+              bottom: { style: BorderStyle.SINGLE, size: 10, color: "1F4E79" },
+              left: { style: BorderStyle.SINGLE, size: 10, color: "1F4E79" },
+              right: { style: BorderStyle.SINGLE, size: 10, color: "1F4E79" },
+            },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 220, after: 220 },
+                // User-required: SURVEY REPORT = 24pt => 48 half-points
+                children: [new TextRun({ text: text.toUpperCase(), bold: true, size: 48, color: "1F3A5F" })],
+              }),
+            ],
+          }),
         ],
       }),
     ],
@@ -477,7 +1935,7 @@ function buildFooterExactLikeImage(wmText: string) {
 }
 
 /** =========================
- * Table helpers
+ * Table header helpers
  * ========================= */
 function headerCell(text: string, span: number) {
   return new TableCell({
@@ -488,8 +1946,8 @@ function headerCell(text: string, span: number) {
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: P0,
-        children: [run(text, { bold: true, color: "FFFFFF", size: 24 })],
+        spacing: STYLE.spacing.none,
+        children: [run(text, { bold: true, color: "FFFFFF", size: STYLE.font.header })],
       }),
     ],
   });
@@ -497,17 +1955,15 @@ function headerCell(text: string, span: number) {
 
 function makeHeaderRow() {
   return new TableRow({
-    tableHeader: true,
-    cantSplit: true,
-    height: { value: 711, rule: HeightRule.ATLEAST },
     children: [
-      headerCell("GPS\nNO", 1),
+      headerCell("GPS NO", 1),
       headerCell("KMS", 1),
-      headerCell("NE\nCORDINATE", 1),
+      headerCell("NE CO-ORDINATE", 1),
       headerCell("DETAILS", 2),
       headerCell("LOCATION", 2),
+      headerCell("DESCRIPTION", 1),
+      headerCell("STATUS", 1),
       headerCell("PHOTO", 3),
-      headerCell("VEHICLE\nMOVEMENT", 1),
     ],
   });
 }
@@ -515,18 +1971,52 @@ function makeHeaderRow() {
 function textCell(text: string, span: number, align: AlignmentType, vAlign: VerticalAlign) {
   const lines = splitLines(text);
   const paras =
-    align === AlignmentType.LEFT ? lines.map(paragraphFromLine) : lines.map((ln) => paragraphPlain(ln, align));
+    align === AlignmentType.LEFT ? lines.map(paragraphFromLine) : lines.map((ln) => paragraphPlain(ln, align, STYLE.spacing.cell));
 
   return new TableCell({
     columnSpan: span,
     verticalAlign: vAlign,
     borders: CELL_BORDERS,
+    margins: STYLE.cellMargins,
     children: paras,
   });
 }
 
 /** =========================
- * Movement square (color only)
+ * DETAILS cell: icon + text
+ * ========================= */
+async function detailsCellWithIcon(detailsText: string, span: number, vAlign: VerticalAlign) {
+  const kind = detectDetailKind(detailsText);
+  const lines = splitLines(detailsText);
+  const firstLine = lines[0] ?? "—";
+  const rest = lines.slice(1);
+
+  const iconBytes = kind ? await iconPngBytes(kind, 34) : null;
+
+  const firstPara = new Paragraph({
+    alignment: AlignmentType.LEFT,
+    spacing: STYLE.spacing.cell,
+    children: [
+      ...(iconBytes
+        ? [new ImageRun({ data: iconBytes, transformation: { width: 16, height: 16 } }), new TextRun({ text: "  ", size: STYLE.font.cell })]
+        : []),
+      new TextRun({ text: firstLine, size: STYLE.font.cell }),
+    ],
+  });
+
+  const restParas = rest.map((ln) => paragraphFromLine(ln));
+
+  return new TableCell({
+    columnSpan: span,
+    verticalAlign: vAlign,
+    borders: CELL_BORDERS,
+    margins: STYLE.cellMargins,
+    children: [firstPara, ...restParas],
+  });
+}
+
+/** =========================
+ * VEHICLE MOVEMENT square
  * ========================= */
 async function squarePngBytes(colorHex: string, sizePx = 26): Promise<Uint8Array> {
   const canvas = document.createElement("canvas");
@@ -556,19 +2046,22 @@ async function movementCell(movement: string) {
     m === "red" ? "#FF0000" : m === "yellow" ? "#FFC000" : m === "green" ? "#00B050" : "#FFFFFF";
 
   const box = 24;
-  let bytes = MOVEMENT_SQUARE_CACHE.get(color);
+  const key = `${color}:${box}`;
+
+  let bytes = MOVEMENT_SQUARE_CACHE.get(key);
   if (!bytes) {
     bytes = await squarePngBytes(color, box);
-    MOVEMENT_SQUARE_CACHE.set(color, bytes);
+    MOVEMENT_SQUARE_CACHE.set(key, bytes);
   }
 
   return new TableCell({
     verticalAlign: VerticalAlign.CENTER,
     borders: CELL_BORDERS,
+    margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: P0,
+        spacing: STYLE.spacing.none,
         children: [new ImageRun({ data: bytes, transformation: { width: box, height: box } })],
       }),
     ],
@@ -624,7 +2117,6 @@ function collectImageStrings(value: any, out: string[] = [], seen = new Set<any>
   if (typeof value === "object") {
     const maybeUrl = (value as any).url ?? (value as any).path ?? (value as any).signedUrl;
     if (typeof maybeUrl === "string") collectImageStrings(maybeUrl, out, seen, depth + 1);
-
     for (const v of Object.values(value)) collectImageStrings(v, out, seen, depth + 1);
     return out;
   }
@@ -743,7 +2235,6 @@ async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
     if (!res.ok) throw new Error(`Photo fetch failed: ${res.status}`);
 
     const blob = await res.blob();
-
     if (blob.type === "image/webp") {
       const pngBytes = await blobToPngBytes(blob);
       if (pngBytes) return pngBytes;
@@ -785,15 +2276,37 @@ async function tryDownloadThenSignedThenPublic(supabase: any, bucket: string, pa
 function extractBucketAndPathFromStorageUrl(url: string): { bucket: string; path: string } | null {
   try {
     const u = new URL(url);
-    const idx = u.pathname.indexOf("/storage/v1/object/");
-    if (idx === -1) return null;
-    const tail = u.pathname.slice(idx + "/storage/v1/object/".length);
-    const parts = tail.split("/").filter(Boolean);
-    if (parts.length < 3) return null;
-    const bucket = parts[1];
-    const path = parts.slice(2).join("/");
-    if (!bucket || !path) return null;
-    return { bucket, path };
+
+    const wrapped = u.searchParams.get("url");
+    if (wrapped && wrapped !== url) {
+      return extractBucketAndPathFromStorageUrl(decodeURIComponent(wrapped));
+    }
+
+    const pathname = decodeURIComponent(u.pathname || "");
+
+    const patterns = [
+      "/storage/v1/object/public/",
+      "/storage/v1/object/sign/",
+      "/storage/v1/object/authenticated/",
+      "/storage/v1/render/image/public/",
+    ];
+
+    for (const marker of patterns) {
+      const idx = pathname.indexOf(marker);
+      if (idx === -1) continue;
+
+      const tail = pathname.slice(idx + marker.length);
+      const parts = tail.split("/").filter(Boolean);
+      if (parts.length < 2) continue;
+
+      const bucket = parts[0];
+      const path = parts.slice(1).join("/");
+      if (!bucket || !path) continue;
+
+      return { bucket, path: cleanPath(path) };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -802,7 +2315,6 @@ function extractBucketAndPathFromStorageUrl(url: string): { bucket: string; path
 async function resolvePhotoBytes(supabase: any, ref: string): Promise<Uint8Array | null> {
   const raw = (ref || "").trim();
   if (!raw) return null;
-
   if (PHOTO_BYTES_CACHE.has(raw)) return PHOTO_BYTES_CACHE.get(raw) as any;
 
   const out = await (async (): Promise<Uint8Array | null> => {
@@ -812,6 +2324,23 @@ async function resolvePhotoBytes(supabase: any, ref: string): Promise<Uint8Array
         const viaApi = await tryDownloadThenSignedThenPublic(supabase, parsed.bucket, parsed.path);
         if (viaApi) return viaApi;
       }
+
+      try {
+        const u = new URL(raw);
+        const wrapped = u.searchParams.get("url");
+        if (wrapped && wrapped !== raw) {
+          const inner = decodeURIComponent(wrapped);
+          const parsedInner = extractBucketAndPathFromStorageUrl(inner);
+          if (parsedInner) {
+            const viaInnerApi = await tryDownloadThenSignedThenPublic(supabase, parsedInner.bucket, parsedInner.path);
+            if (viaInnerApi) return viaInnerApi;
+          }
+          try {
+            return await fetchBytes(inner);
+          } catch {}
+        }
+      } catch {}
+
       try {
         return await fetchBytes(raw);
       } catch {
@@ -819,7 +2348,7 @@ async function resolvePhotoBytes(supabase: any, ref: string): Promise<Uint8Array
       }
     }
 
-    const cleaned = cleanPath(raw);
+    const cleaned = cleanPath(decodeURIComponent(raw));
     const parts = cleaned.split("/");
     const first = parts[0] || "";
 
@@ -846,21 +2375,34 @@ async function resolvePhotoBytes(supabase: any, ref: string): Promise<Uint8Array
   return out;
 }
 
-async function photoCell(supabase: any, refs: string[], includePhotos: boolean) {
+/** =========================
+ * PHOTO cell: adjusted sizing so the image is fully visible in the widened PHOTO area
+ * ========================= */
+async function photoCell(supabase: any, refs: string[], includePhotos: boolean, caption?: string) {
   const list = (refs || []).filter(Boolean).slice(0, 3);
 
   if (!includePhotos || list.length === 0) {
+    const cap = (caption || "").trim();
     return new TableCell({
       columnSpan: 3,
       verticalAlign: VerticalAlign.TOP,
-      borders: CELL_BORDERS,
-      children: [new Paragraph({ spacing: P0, text: "" })],
+      borders: PHOTO_CELL_BORDERS,
+      margins: { top: 40, bottom: 40, left: 80, right: 80 } as any,
+      children: cap
+        ? [
+            new Paragraph({
+              alignment: AlignmentType.LEFT,
+              spacing: STYLE.spacing.cell,
+              children: [new TextRun({ text: cap, size: STYLE.font.cellSmall })],
+            }),
+          ]
+        : [new Paragraph({ spacing: STYLE.spacing.none, text: "" })],
     });
   }
 
   const multi = list.length > 1;
-  const imgW = 277;
-  const imgH = multi ? 150 : 208;
+  const imgW = multi ? STYLE.photo.multi.w : STYLE.photo.single.w;
+  const imgH = multi ? STYLE.photo.multi.h : STYLE.photo.single.h;
 
   const bytesList = await Promise.all(list.map((r) => resolvePhotoBytes(supabase, r)));
 
@@ -871,7 +2413,7 @@ async function photoCell(supabase: any, refs: string[], includePhotos: boolean) 
     paras.push(
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: { ...P0, after: i === bytesList.length - 1 ? 0 : 60 },
+        spacing: { ...STYLE.spacing.none, after: i === bytesList.length - 1 ? 0 : 40 },
         children: [new ImageRun({ data: bytes, transformation: { width: imgW, height: imgH } })],
       })
     );
@@ -881,18 +2423,28 @@ async function photoCell(supabase: any, refs: string[], includePhotos: boolean) 
     throw new Error(`Photo refs detected but could not be resolved.\nFirst ref: ${list[0]}`);
   }
 
+  const cap2 = (caption || "").trim();
+  if (cap2) {
+    paras.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 80, after: 0, line: 276 },
+        children: [new TextRun({ text: cap2, size: STYLE.font.cellSmall })],
+      })
+    );
+  }
+
   return new TableCell({
     columnSpan: 3,
     verticalAlign: VerticalAlign.TOP,
-    borders: CELL_BORDERS,
-    children: paras.length ? paras : [new Paragraph({ spacing: P0, text: "" })],
+    borders: PHOTO_CELL_BORDERS,
+    margins: { top: 40, bottom: 40, left: 80, right: 80 } as any,
+    children: paras.length ? paras : [new Paragraph({ spacing: STYLE.spacing.none, text: "" })],
   });
 }
 
 /** =========================
  * Normalize Point
- * ✅ DETAILS = category (default) OR point.details/description
- * ✅ LOCATION = readable location from reverse geocode (later)
  * ========================= */
 function normalizePoint(raw: any): NormalizedPoint {
   const gpsCandidate = s(
@@ -940,15 +2492,22 @@ function normalizePoint(raw: any): NormalizedPoint {
     ne_coordinate = raw.coordinate.trim();
   }
 
-  // ✅ DETAILS: use point details/remarks if present. otherwise fallback to report category
-  const details = s(raw.details ?? raw.remarks ?? raw.note ?? raw.description ?? raw.desc ?? raw.__report_category ?? "");
-
-  // ✅ LOCATION: keep only text fields if present (DO NOT put maps URL here)
+  const details = s(raw.details ?? raw.remarks ?? raw.note ?? raw.__report_category ?? raw.category ?? "");
   const location = s(raw.location ?? raw.place ?? raw.area ?? raw.city ?? raw.village ?? "");
-
   const photo_refs = Array.from(new Set(collectImageStrings(raw)));
 
-  // ✅ MOVEMENT: use report difficulty OR row-level difficulty
+  const photo_description = s(
+    raw.photo_description ??
+      raw.photo_desc ??
+      raw.image_description ??
+      raw.__report_description ??
+      raw.description ??
+      raw.desc ??
+      ""
+  );
+
+  const description = s(raw.description ?? raw.desc ?? raw.__report_description ?? "");
+
   const movement = normalizeMovement(
     raw.difficulty ?? raw.vehicle_movement ?? raw.movement ?? raw.status ?? raw.__report_difficulty ?? ""
   );
@@ -959,28 +2518,18 @@ function normalizePoint(raw: any): NormalizedPoint {
     ne_coordinate,
     details,
     location,
-    photo_refs,
+    description: description || "—",
     movement,
+    photo_refs,
+    photo_description,
     __lat: !Number.isNaN(lat as any) ? lat : null,
     __lon: !Number.isNaN(lon as any) ? lon : null,
   };
 }
 
 /** =========================
- * GPS / KMS compute
+ * KMS compute
  * ========================= */
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 function enrichPointsAlways(points: any[]): NormalizedPoint[] {
   const norm = points.map((p) => normalizePoint(p));
 
@@ -1016,7 +2565,7 @@ function enrichPointsAlways(points: any[]): NormalizedPoint[] {
 }
 
 /** =========================
- * Extra photo table lookup (report_photos)
+ * Extra photos (report_photos)
  * ========================= */
 async function getExtraPhotosForReport(supabase: any, reportId: string) {
   const { data, error } = await supabase
@@ -1054,9 +2603,9 @@ function applyExtraPhotos(points: NormalizedPoint[], extraRefs: string[]) {
 
 /** =========================
  * Points loader
- * (tries many tables)
  * ========================= */
 const TABLE_CANDIDATES = [
+  "report_path_points",
   "route_points",
   "route_point",
   "route_locations",
@@ -1089,6 +2638,8 @@ const FK_CANDIDATES = [
   "routeid",
   "routeId",
   "project_id",
+  "projectid",
+  "projectId",
 ];
 
 async function getPointsForReport(supabase: any, reportId: string) {
@@ -1098,12 +2649,10 @@ async function getPointsForReport(supabase: any, reportId: string) {
   const routeId = report?.route_id ?? report?.routeId ?? null;
   const projectId = report?.project_id ?? report?.projectId ?? null;
 
-  // ✅ Difficulty from reports table
   const reportDifficulty = normalizeMovement(report?.difficulty ?? "");
 
   for (const table of TABLE_CANDIDATES) {
     try {
-      // small existence check
       const probe = await supabase.from(table).select("*").limit(1);
       if (probe.error) continue;
 
@@ -1115,11 +2664,11 @@ async function getPointsForReport(supabase: any, reportId: string) {
 
         const { data, error } = await supabase.from(table).select("*").eq(fk, targetValue);
         if (!error && Array.isArray(data) && data.length) {
-          // ✅ patch rows with report difficulty + report category (so DETAILS can fallback)
           const patched = (data || []).map((row: any) => ({
             ...row,
             __report_difficulty: reportDifficulty,
             __report_category: report?.category ?? "",
+            __report_description: report?.description ?? "",
           }));
           return { points: patched, report, routeId };
         }
@@ -1127,7 +2676,6 @@ async function getPointsForReport(supabase: any, reportId: string) {
     } catch {}
   }
 
-  // fallback to report location if exists
   if (report?.loc_lat && report?.loc_lon) {
     return {
       points: [
@@ -1138,6 +2686,7 @@ async function getPointsForReport(supabase: any, reportId: string) {
           location: "",
           __report_difficulty: reportDifficulty,
           __report_category: report?.category ?? "",
+          __report_description: report?.description ?? "",
         },
       ],
       report,
@@ -1145,15 +2694,15 @@ async function getPointsForReport(supabase: any, reportId: string) {
     };
   }
 
-  throw new Error(`Points not found.\nreport_id=${reportId}\nroute_id=${routeId || "NULL"} project_id=${projectId || "NULL"}`);
+  throw new Error(
+    `Points not found.\nreport_id=${reportId}\nroute_id=${routeId || "NULL"} project_id=${projectId || "NULL"}`
+  );
 }
 
 /** =========================
- * ✅ BODY ROW BUILDER
- * - LOCATION is reverse-geocoded from NE coords
+ * BODY ROW BUILDER
  * ========================= */
 async function makeBodyRow(supabase: any, p: NormalizedPoint, includePhotos: boolean) {
-  // 1) Determine lat/lon
   let lat = p.__lat ?? null;
   let lon = p.__lon ?? null;
 
@@ -1165,7 +2714,6 @@ async function makeBodyRow(supabase: any, p: NormalizedPoint, includePhotos: boo
     }
   }
 
-  // 2) Reverse geocode to readable place
   let locText = (p.location || "").trim();
   if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
     const place = await reverseGeocodeOSM(lat, lon);
@@ -1175,42 +2723,1104 @@ async function makeBodyRow(supabase: any, p: NormalizedPoint, includePhotos: boo
 
   return new TableRow({
     cantSplit: true,
-    height: { value: 2490, rule: HeightRule.ATLEAST },
-    children: [
+children: [
       textCell(p.gps_no, 1, AlignmentType.CENTER, VerticalAlign.CENTER),
       textCell(p.kms, 1, AlignmentType.CENTER, VerticalAlign.CENTER),
       textCell(p.ne_coordinate, 1, AlignmentType.CENTER, VerticalAlign.CENTER),
-      textCell(p.details, 2, AlignmentType.LEFT, VerticalAlign.CENTER),
+
+      await detailsCellWithIcon(p.details, 2, VerticalAlign.CENTER),
       textCell(locText, 2, AlignmentType.LEFT, VerticalAlign.CENTER),
-      await photoCell(supabase, p.photo_refs, includePhotos),
-      await movementCell(p.movement), // ✅ based on difficulty
+      textCell(p.description || "—", 1, AlignmentType.LEFT, VerticalAlign.CENTER),
+
+      await movementCell(p.movement),
+
+      await photoCell(supabase, p.photo_refs, includePhotos, p.photo_description),
     ],
   });
 }
 
+
+/** =========================
+ * ✅ FULL-PAGE PHOTO LAYOUT (one photo per page)
+ * Top info table (green header) + big centered photo
+ * ========================= */
+function photoPageHeaderCell(text: string, widthPct: number) {
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_HEADER_FILL },
+    borders: CELL_BORDERS,
+    margins: { top: 220, bottom: 220, left: 160, right: 160 } as any,
+    children: [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: STYLE.spacing.none,
+        children: [new TextRun({ text, bold: true, color: "FFFFFF", size: 32 })],
+      }),
+    ],
+  });
+}
+
+function photoPageValueCell(text: string, widthPct: number, align: AlignmentType = AlignmentType.LEFT) {
+  const lines = splitLines(text);
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_ROW_FILL },
+    borders: CELL_BORDERS,
+    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
+    children: lines.map((ln) =>
+      new Paragraph({
+        alignment: align,
+        spacing: STYLE.spacing.cell,
+        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
+      })
+    ),
+  });
+}
+
+/** ✅ NEW: Photo-page helpers (OBS icon + Route difficulty) */
+function routeDifficultyFill(m: string) {
+  const mm = normalizeMovement(m);
+  if (mm === "green") return "C6EFCE"; // light green
+  if (mm === "yellow") return "FFF2CC"; // light yellow
+  if (mm === "red") return "F8CBAD"; // light red
+  return PHOTO_PAGE_ROW_FILL;
+}
+
+function photoPageRouteDifficultyCell(movement: string, widthPct: number) {
+  const mm = normalizeMovement(movement);
+  const label = mm ? mm.toUpperCase() : "—";
+
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: routeDifficultyFill(mm) },
+    borders: CELL_BORDERS,
+    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
+    children: [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: STYLE.spacing.cell,
+        children: [new TextRun({ text: label, bold: true, size: 32, color: "0B3D2E" })],
+      }),
+    ],
+  });
+}
+
+async function photoPageObsCell(detailsText: string, descText: string, widthPct: number) {
+  const kind = detectDetailKind(detailsText || "");
+  // High-res source so the icon stays sharp even when displayed
+  const iconBytes = kind ? await iconPngBytes(kind, 120) : null;
+
+  const d1 = String(detailsText || "").trim();
+  const d2 = String(descText || "").trim();
+
+  // ✅ Only include description if it exists (prevents stray "—" line)
+  const combined = [d1 || "—", d2].filter(Boolean).join("\n");
+  const lines = splitLines(combined);
+
+  const first = lines[0] ?? "—";
+  const rest = lines.slice(1).filter((x) => String(x).trim() !== "—");
+
+  const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+
+  // ✅ Perfect alignment: use a 2-column inner table (icon | text)
+  const iconTextRow = new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            width: { size: 12, type: WidthType.PERCENTAGE },
+            verticalAlign: VerticalAlign.CENTER,
+            borders: { top: none, bottom: none, left: none, right: none },
+            margins: { top: 0, bottom: 0, left: 0, right: 120 } as any,
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                spacing: STYLE.spacing.none,
+                children: iconBytes
+                  ? [new ImageRun({ data: iconBytes, transformation: { width: 34, height: 34 } })]
+                  : [],
+              }),
+            ],
+          }),
+          new TableCell({
+            width: { size: 88, type: WidthType.PERCENTAGE },
+            verticalAlign: VerticalAlign.CENTER,
+            borders: { top: none, bottom: none, left: none, right: none },
+            margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: STYLE.spacing.none,
+                children: [new TextRun({ text: first, bold: true, size: 32, color: "0B3D2E" })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  const restParas = rest.map(
+    (ln) =>
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: STYLE.spacing.cell,
+        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
+      })
+  );
+
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_ROW_FILL },
+    borders: CELL_BORDERS,
+    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
+    children: [
+      new Paragraph({ spacing: STYLE.spacing.none, text: "" }),
+      iconTextRow as any,
+      ...restParas,
+    ],
+  });
+}
+
+
+
+
+
+// =========================
+// LAST PAGE: SUMMARY LIST TABLES (Bridges / Toll Plazas / Metro Sites / Tree Branches)
+// Added WITHOUT changing existing data logic — uses already-normalized points.
+// =========================
+function movementRemark(movement: string) {
+  const mm = normalizeMovement(movement);
+  if (mm === "green") return "Clear Pass for TBM";
+  if (mm === "yellow") return "Proceed with Caution";
+  if (mm === "red") return "Not Recommended";
+  return "—";
+}
+
+function summaryItemDescription(p: NormalizedPoint) {
+  const title = String(p.details || "").trim() || "—";
+  const desc = String(p.description || "").trim();
+  const loc = String(p.location || "").trim();
+
+  const parts: string[] = [];
+  const first = loc ? `${title} - ${loc}` : title;
+  parts.push(first);
+  if (desc) parts.push(desc);
+  return parts.join("\n");
+}
+
+function makeSummaryTable(items: NormalizedPoint[]) {
+  const headerFill = "F2F2F2";
+
+  const hdrCell = (text: string) =>
+    new TableCell({
+      borders: CELL_BORDERS,
+      shading: { type: ShadingType.CLEAR, fill: headerFill },
+      verticalAlign: VerticalAlign.CENTER,
+      margins: { top: 220, bottom: 220, left: 180, right: 180 } as any,
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: STYLE.spacing.none,
+          children: [new TextRun({ text, bold: true, size: 34, color: "000000" })],
+        }),
+      ],
+    });
+
+  const valueCell = (text: string, align: AlignmentType = AlignmentType.LEFT, boldFirstLine = false) => {
+    const lines = splitLines(text || "—");
+    return new TableCell({
+      borders: CELL_BORDERS,
+      verticalAlign: VerticalAlign.TOP,
+      margins: { top: 220, bottom: 220, left: 180, right: 180 } as any,
+      children: lines.map((t, i) =>
+        new Paragraph({
+          alignment: align,
+          spacing: { before: i === 0 ? 0 : 90, after: 0 } as any,
+          children: [
+            new TextRun({
+              text: String(t || "—"),
+              size: 32,
+              bold: boldFirstLine && i === 0,
+              color: "000000",
+            }),
+          ],
+        })
+      ),
+    });
+  };
+
+  const rows: TableRow[] = [
+    new TableRow({
+      height: { value: 1000, rule: HeightRule.ATLEAST },
+      children: [hdrCell("Kms"), hdrCell("Description"), hdrCell("Remark/Recommendation")],
+    }),
+  ];
+
+  for (const p of items) {
+    rows.push(
+      new TableRow({
+        height: { value: 1200, rule: HeightRule.ATLEAST },
+        children: [
+          valueCell(String(p.kms || "—"), AlignmentType.CENTER),
+          valueCell(summaryItemDescription(p), AlignmentType.LEFT, true),
+          valueCell(movementRemark(p.movement), AlignmentType.LEFT),
+        ],
+      })
+    );
+  }
+
+  return new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows,
+    columnWidths: [2500, 15000, 6078],
+  });
+}
+
+async function buildLastSummaryListsSection(params: {
+  projectName: string;
+  points: NormalizedPoint[];
+  footerDate?: string | Date;
+}) {
+  const { projectName, points, footerDate } = params;
+
+  // ✅ Display names for ALL kinds (add more anytime, but anything missing still shows)
+  const KIND_LABEL: Record<string, string> = {
+    footpath_bridge: "List of Footpath Bridges",
+    bridge: "List of Bridges",
+    underpass: "List of Underpass",
+    lt_cable: "List of LT Cables",
+    ht_cable: "List of HT Cables",
+    towerline_cable: "List of Towerline Cables",
+    towerline: "List of Towerlines",
+    junction_left: "List of Left Junctions / Turns",
+    junction_right: "List of Right Junctions / Turns",
+    bend: "List of Bends",
+    diversion: "List of Diversions",
+    tree: "List of Tree Branches",
+    petrol: "List of Petrol Bunks",
+    electric_sign: "List of Electric Sign Boards",
+    signboard: "List of Sign Boards",
+    camera_pole: "List of Camera Poles",
+    toll: "List of Toll Plazas",
+  };
+
+  // ✅ Ordering (you can rearrange; anything not listed will appear later)
+  const ORDER: string[] = [
+    "bridge",
+    "footpath_bridge",
+    "underpass",
+    "toll",
+    "metro", // keyword category
+    "diversion",
+    "petrol",
+    "electric_sign",
+    "signboard",
+    "camera_pole",
+    "junction_left",
+    "junction_right",
+    "bend",
+    "lt_cable",
+    "ht_cable",
+    "towerline_cable",
+    "towerline",
+    "tree",
+  ];
+
+  // ✅ Collect items per category
+  const buckets = new Map<string, NormalizedPoint[]>();
+  const ensure = (k: string) => {
+    if (!buckets.has(k)) buckets.set(k, []);
+    return buckets.get(k)!;
+  };
+
+  for (const p of points) {
+    const details = String(p.details || "");
+    const desc = String(p.description || "");
+    const loc = String(p.location || "");
+    const tAll = `${details} ${desc} ${loc}`.toLowerCase();
+
+    // Special keyword bucket for metro (since detectDetailKind doesn’t return "metro")
+    if (tAll.includes("metro")) {
+      ensure("metro").push(p);
+      continue;
+    }
+
+    const k = detectDetailKind(details);
+
+    if (k) {
+      ensure(k).push(p);
+    } else {
+      ensure("other").push(p);
+    }
+  }
+
+  const children: any[] = [];
+  children.push(new Paragraph({ spacing: { before: 120, after: 0 }, text: "" }));
+
+  // Helper to print a section
+  const addSection = (key: string) => {
+    const items = buckets.get(key);
+    if (!items || !items.length) return;
+
+    // Bridges table in your reference shows without heading first — keep that behavior if you want:
+    const isFirstBridgeLike =
+      key === "bridge" && items.length > 0 && children.length <= 2; // after initial spacer
+
+    const titleBase =
+      key === "metro"
+        ? "List of Metro Site"
+        : (KIND_LABEL[key] || `List of ${key.replace(/_/g, " ")}`);
+
+    const title = `${titleBase} (${items.length})`;
+
+    if (!isFirstBridgeLike) {
+      children.push(
+        new Paragraph({
+          spacing: { before: 60, after: 120 } as any,
+          // User-required: page titles = 24pt => 48 half-points
+          children: [new TextRun({ text: title, bold: true, size: 48, color: "000000" })],
+        })
+      );
+    } else {
+      // If you still want “no heading for first bridges table”, just skip title.
+      // If you DO want the title, comment this else block and keep the if above only.
+    }
+
+    children.push(makeSummaryTable(items));
+    children.push(new Paragraph({ spacing: { before: 260, after: 0 }, text: "" }));
+  };
+
+  // ✅ Print sections in preferred order
+  for (const k of ORDER) addSection(k);
+
+  // ✅ Print any remaining categories not in ORDER
+  const remaining = Array.from(buckets.keys()).filter((k) => !ORDER.includes(k));
+  for (const k of remaining) addSection(k);
+
+  // ✅ If nothing to show
+  const totalItems = Array.from(buckets.values()).reduce((a, b) => a + b.length, 0);
+  if (!totalItems) {
+    children.push(
+      new Paragraph({
+        spacing: { before: 200, after: 0 } as any,
+        children: [new TextRun({ text: "No summary items available.", size: 32, color: "000000" })],
+      })
+    );
+  }
+
+  return {
+    properties: sectionPropsA3Landscape(),
+    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+    children,
+  };
+}
+
+
+async function buildCategoryCountSummarySection(params: {
+  projectName: string;
+  points: NormalizedPoint[];
+  footerDate?: string | Date;
+}) {
+  const { points, footerDate } = params;
+
+  // Same labels used in "List of ..." page (kept in-sync)
+  const KIND_LABEL: Record<string, string> = {
+    footpath_bridge: "List of Footpath Bridges",
+    bridge: "List of Bridges",
+    underpass: "List of Underpass",
+    lt_cable: "List of LT Cables",
+    ht_cable: "List of HT Cables",
+    towerline_cable: "List of Towerline Cables",
+    towerline: "List of Towerlines",
+    junction_left: "List of Left Junctions / Turns",
+    junction_right: "List of Right Junctions / Turns",
+    bend: "List of Bends",
+    diversion: "List of Diversions",
+    tree: "List of Tree Branches",
+    petrol: "List of Petrol Bunks",
+    electric_sign: "List of Electric Sign Boards",
+    signboard: "List of Sign Boards",
+    camera_pole: "List of Camera Poles",
+    toll: "List of Toll Plazas",
+  };
+
+  const ORDER: string[] = [
+    "bridge",
+    "footpath_bridge",
+    "underpass",
+    "toll",
+    "metro",
+    "diversion",
+    "petrol",
+    "electric_sign",
+    "signboard",
+    "camera_pole",
+    "junction_left",
+    "junction_right",
+    "bend",
+    "lt_cable",
+    "ht_cable",
+    "towerline_cable",
+    "towerline",
+    "tree",
+  ];
+
+  const counts = new Map<string, number>();
+  const inc = (k: string) => counts.set(k, (counts.get(k) || 0) + 1);
+
+  for (const p of points) {
+    const details = String(p.details || "");
+    const desc = String(p.description || "");
+    const loc = String(p.location || "");
+    const tAll = `${details} ${desc} ${loc}`.toLowerCase();
+
+    if (tAll.includes("metro")) {
+      inc("metro");
+      continue;
+    }
+
+    const k = detectDetailKind(details);
+    if (k) inc(k);
+    else inc("other");
+  }
+
+  const labelOf = (key: string) => {
+    if (key === "metro") return "Metro Site";
+    const raw = KIND_LABEL[key] || `List of ${key.replace(/_/g, " ")}`;
+    return raw.replace(/^List of\s+/i, "").trim();
+  };
+
+  const headerFill = "F2F2F2";
+
+  const hdr = (text: string) =>
+    new TableCell({
+      borders: CELL_BORDERS,
+      shading: { type: ShadingType.CLEAR, fill: headerFill },
+      verticalAlign: VerticalAlign.CENTER,
+      margins: { top: 240, bottom: 240, left: 220, right: 220 } as any,
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: STYLE.spacing.none,
+          children: [new TextRun({ text, bold: true, size: 34, color: "000000" })],
+        }),
+      ],
+    });
+
+  const cell = (text: string, align: AlignmentType = AlignmentType.LEFT, bold = false) =>
+    new TableCell({
+      borders: CELL_BORDERS,
+      verticalAlign: VerticalAlign.CENTER,
+      margins: { top: 240, bottom: 240, left: 220, right: 220 } as any,
+      children: [
+        new Paragraph({
+          alignment: align,
+          spacing: STYLE.spacing.none,
+          children: [new TextRun({ text, size: 32, bold, color: "000000" })],
+        }),
+      ],
+    });
+
+  const rows: TableRow[] = [
+    new TableRow({
+      height: { value: 1000, rule: HeightRule.ATLEAST },
+      children: [hdr("Category"), hdr("Count")],
+    }),
+  ];
+
+  const addRow = (key: string) => {
+    const c = counts.get(key) || 0;
+    if (!c) return;
+    rows.push(
+      new TableRow({
+        height: { value: 950, rule: HeightRule.ATLEAST },
+        children: [cell(labelOf(key), AlignmentType.LEFT, true), cell(String(c), AlignmentType.CENTER, true)],
+      })
+    );
+  };
+
+  for (const k of ORDER) addRow(k);
+
+  // Any remaining non-ordered categories (rare, but safe)
+  const remaining = Array.from(counts.keys()).filter((k) => !ORDER.includes(k) && (counts.get(k) || 0) > 0);
+  remaining.sort();
+  for (const k of remaining) addRow(k);
+
+  const children: any[] = [];
+
+  children.push(
+    new Paragraph({
+      spacing: { before: 160, after: 220 } as any,
+      children: [new TextRun({ text: "CATEGORY STAGE SUMMARY", bold: true, size: 48, color: "000000" })],
+    })
+  );
+
+  children.push(
+    new Table({
+      layout: TableLayoutType.FIXED,
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows,
+      columnWidths: [17500, 6078],
+    })
+  );
+
+  return {
+    properties: sectionPropsA3Landscape(),
+    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+    children,
+  };
+}
+
+
+async function buildPhotoPageSection(
+  params: {
+    supabase: any;
+    projectName: string;
+    p: NormalizedPoint;
+    photoRefs: string[];
+    footerDate?: string | Date;
+    watermarkEnabled?: boolean;
+  }
+) {
+  const { supabase, projectName, p, photoRefs, footerDate, watermarkEnabled } = params;
+
+  // Location name (reverse-geocode if possible)
+  let lat = p.__lat ?? null;
+  let lon = p.__lon ?? null;
+
+  if ((lat == null || lon == null) && p.ne_coordinate) {
+    const parsed = parseNEToDecimal(p.ne_coordinate);
+    if (parsed) {
+      lat = parsed.lat;
+      lon = parsed.lon;
+    }
+  }
+
+  let locText = (p.location || "").trim();
+  if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
+    const place = await reverseGeocodeOSM(lat, lon);
+    if (place) locText = place;
+  }
+  if (!locText) locText = "—";
+
+  const obsCell = await photoPageObsCell(p.details || "—", p.description || "", 30);
+
+  const diffCell = photoPageRouteDifficultyCell(p.movement, 20);
+
+  const topInfo = new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        children: [
+          photoPageHeaderCell("GPS\nLOCATION", 18),
+          photoPageHeaderCell("KM", 12),
+          photoPageHeaderCell("LOCATION", 20),
+          photoPageHeaderCell("OBSERVATIONS", 30),
+          photoPageHeaderCell("REMARKS / ACTION", 20),
+        ],
+      }),
+      new TableRow({
+        height: { value: 3200, rule: HeightRule.ATLEAST },
+        children: [
+          photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT),
+          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER),
+          photoPageValueCell(locText, 20, AlignmentType.LEFT),
+          obsCell,
+          diffCell,
+        ],
+      }),
+    ],
+  });
+
+  const refs = (photoRefs || []).filter(Boolean).slice(0, 2);
+
+  const bytesA = refs[0] ? await resolvePhotoBytes(supabase, refs[0]) : null;
+  const bytesB = refs[1] ? await resolvePhotoBytes(supabase, refs[1]) : null;
+
+const wrapperNone = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+
+  const content: any[] = [];
+  content.push(new Paragraph({ spacing: { before: 0, after: 0 }, text: "" }));
+content.push(topInfo);
+
+  // small gap between table and image (keep them together)
+  content.push(new Paragraph({ spacing: { before: 80, after: 0 }, text: "" }));
+
+  if (bytesA && !bytesB) {
+    // ✅ Single image (reduced height so it stays with the table on the same page)
+    content.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 0, after: 0 },
+        children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 1500, 560) })],
+      })
+    );
+  } else if (bytesA && bytesB) {
+    // ✅ Two images side-by-side
+    const imgs = new Table({
+      layout: TableLayoutType.FIXED,
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 0, after: 0 },
+                  children: [new ImageRun({ data: bytesA, transformation: fitTransform(bytesA, 730, 420) })],
+                }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { before: 0, after: 0 },
+                  children: [new ImageRun({ data: bytesB, transformation: fitTransform(bytesB, 730, 420) })],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    });
+    content.push(imgs);
+  } else {
+    content.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 160, after: 0 },
+        children: [new TextRun({ text: "Photo not available.", size: 32, bold: true, color: "B42318" })],
+      })
+    );
+  }
+
+  // Wrap table+image in one row so Word won't split them across pages
+  const children: any[] = [
+    new Table({
+      layout: TableLayoutType.FIXED,
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          cantSplit: true,
+          children: [
+            new TableCell({
+              borders: { top: wrapperNone, bottom: wrapperNone, left: wrapperNone, right: wrapperNone },
+              margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
+              children: content,
+            }),
+          ],
+        }),
+      ],
+    }),
+  ];
+
+  return {
+    properties: {
+      verticalAlign: VerticalAlign.CENTER,
+      page: {
+        size: { width: A3_W, height: A3_H, orientation: PageOrientation.LANDSCAPE },
+        margin: TABLE_MARGIN as any,
+        ...(pageBordersTSPL() as any),
+      } as any,
+    },
+    footers: { default: buildFooterTablePages(footerDate ?? new Date()) },
+    children,
+  };
+}
+
+
 /** =========================
  * DOC builder
  * ========================= */
+
+
+
+
+function __decodeHtmlEntities(s: string) {
+  return String(s || "")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&ndash;/gi, "–")
+    .replace(/&mdash;/gi, "—")
+    .replace(/\u00A0/g, " ");
+}
+
+function htmlToDocxParagraphs_Conclusion(html: string): Paragraph[] {
+  const safe = __decodeHtmlEntities(String(html || "").trim());
+  if (!safe) return [];
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<div>${safe}</div>`, "text/html");
+  const root = doc.body.firstElementChild as HTMLElement | null;
+  if (!root) return [];
+
+  const paragraphs: Paragraph[] = [];
+
+  const base = {
+    bold: false,
+    italics: false,
+    underline: false,
+    size: 28, // 14pt
+    align: AlignmentType.LEFT as AlignmentType,
+  };
+
+  const merge = (a: any, b: any) => ({
+    bold: a.bold || b.bold,
+    italics: a.italics || b.italics,
+    underline: a.underline || b.underline,
+    size: b.size ?? a.size,
+    align: b.align ?? a.align,
+  });
+
+  const cssSizeToHalfPoints = (v: string) => {
+    const s = String(v || "").trim().toLowerCase();
+    if (!s) return null;
+    const m = s.match(/^([0-9.]+)\s*(pt|px)?$/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const unit = (m[2] || "px") as "pt" | "px";
+    const pt = unit === "px" ? n * 0.75 : n;
+    return Math.round(pt * 2);
+  };
+
+  const walkInline = (node: Node, style: any, out: (TextRun | ExternalHyperlink)[]) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = __decodeHtmlEntities(node.nodeValue || "");
+      if (t) {
+        out.push(
+          new TextRun({
+            text: t,
+            bold: style.bold || undefined,
+            italics: style.italics || undefined,
+            underline: style.underline ? { type: UnderlineType.SINGLE } : undefined,
+            size: style.size ?? 28,
+            color: "111111",
+          })
+        );
+      }
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+
+    if (tag === "br") {
+      out.push(new TextRun({ text: "\n" }));
+      return;
+    }
+
+    // hyperlink
+    if (tag === "a") {
+      const href = el.getAttribute("href") || "";
+      const runs: TextRun[] = [];
+      const innerStyle = merge(style, { underline: true });
+      for (const ch of Array.from(el.childNodes)) {
+        // only TextRuns inside link
+        if (ch.nodeType === Node.TEXT_NODE) {
+          const t = __decodeHtmlEntities(ch.nodeValue || "");
+          if (t) {
+            runs.push(
+              new TextRun({
+                text: t,
+                bold: innerStyle.bold || undefined,
+                italics: innerStyle.italics || undefined,
+                underline: { type: UnderlineType.SINGLE },
+                size: innerStyle.size ?? 28,
+                color: "0563C1",
+              })
+            );
+          }
+        } else {
+          // recurse but force TextRun output
+          const tmp: any[] = [];
+          walkInline(ch, innerStyle, tmp);
+          for (const rr of tmp) {
+            if (rr instanceof TextRun) runs.push(rr);
+          }
+        }
+      }
+      if (href && runs.length) {
+        out.push(new ExternalHyperlink({ link: href, children: runs }));
+      } else {
+        // fallback to normal rendering
+        for (const r of runs) out.push(r);
+      }
+      return;
+    }
+
+    const computed: any = {};
+    if (tag === "strong" || tag === "b") computed.bold = true;
+    if (tag === "em" || tag === "i") computed.italics = true;
+    if (tag === "u") computed.underline = true;
+
+    const hp = cssSizeToHalfPoints((el.style as any)?.fontSize || "");
+    if (hp) computed.size = hp;
+
+    const mergedStyle = merge(style, computed);
+
+    for (const ch of Array.from(el.childNodes)) {
+      walkInline(ch, mergedStyle, out);
+    }
+  };
+
+  const pushParagraph = (runs: (TextRun | ExternalHyperlink)[], style: any, extra?: any) => {
+    paragraphs.push(
+      new Paragraph({
+        alignment: style.align ?? AlignmentType.LEFT,
+        spacing: { before: 0, after: 160, line: 360 } as any,
+        children: runs.length ? (runs as any) : [new TextRun({ text: "", size: style.size ?? 28 })],
+        ...extra,
+      })
+    );
+  };
+
+  const block = (el: HTMLElement, style: any, listPrefix?: string) => {
+    const tag = el.tagName.toLowerCase();
+
+    if (tag === "li") {
+      const runs: (TextRun | ExternalHyperlink)[] = [];
+      const prefix = (listPrefix || "•") + "  ";
+      runs.push(new TextRun({ text: prefix, size: style.size ?? 28, color: "111111" }));
+      for (const ch of Array.from(el.childNodes)) walkInline(ch, style, runs);
+      pushParagraph(runs, style, { indent: { left: 720, hanging: 360 } as any });
+      return;
+    }
+
+    if (tag === "ul") {
+      for (const li of Array.from(el.children)) {
+        if ((li as HTMLElement).tagName.toLowerCase() === "li") block(li as HTMLElement, style, "•");
+      }
+      return;
+    }
+
+    if (tag === "ol") {
+      let i = 1;
+      for (const li of Array.from(el.children)) {
+        if ((li as HTMLElement).tagName.toLowerCase() === "li") {
+          block(li as HTMLElement, style, `${i}.`);
+          i += 1;
+        }
+      }
+      return;
+    }
+
+    if (tag === "p" || tag === "div") {
+      const runs: (TextRun | ExternalHyperlink)[] = [];
+      const alignCss = String((el.style as any)?.textAlign || "").toLowerCase();
+      const align =
+        alignCss === "center"
+          ? AlignmentType.CENTER
+          : alignCss === "right"
+            ? AlignmentType.RIGHT
+            : AlignmentType.LEFT;
+
+      const fs = cssSizeToHalfPoints(String((el.style as any)?.fontSize || ""));
+      const st = merge(style, { align, size: fs ?? undefined });
+
+      for (const ch of Array.from(el.childNodes)) walkInline(ch, st, runs);
+      // keep empty line
+      if (!runs.length) runs.push(new TextRun({ text: "" }));
+      pushParagraph(runs, st);
+      return;
+    }
+
+    // fallback recurse
+    for (const ch of Array.from(el.children)) block(ch as HTMLElement, style);
+  };
+
+  // Walk top-level nodes. Convert block elements to paragraphs, and also capture stray inline/text at root.
+  let pendingInline: (TextRun | ExternalHyperlink)[] = [];
+
+  const flushInline = () => {
+    if (pendingInline.length) {
+      pushParagraph(pendingInline, base);
+      pendingInline = [];
+    }
+  };
+
+  const isBlockTag = (tag: string) =>
+    ["p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6"].includes(tag);
+
+  for (const n of Array.from(root.childNodes)) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = __decodeHtmlEntities(n.nodeValue || "");
+      if (t.trim()) {
+        // treat as inline text; keep spaces
+        walkInline(n, base, pendingInline);
+      }
+      continue;
+    }
+
+    if (n.nodeType !== Node.ELEMENT_NODE) continue;
+    const el = n as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+
+    if (tag.startsWith("h") && tag.length === 2) {
+      flushInline();
+      const runs: (TextRun | ExternalHyperlink)[] = [];
+      const st = merge(base, { bold: true, size: 56 }); // 28pt
+      for (const ch of Array.from(el.childNodes)) walkInline(ch, st, runs);
+      pushParagraph(runs, st, { spacing: { before: 0, after: 220, line: 360 } as any });
+      continue;
+    }
+
+    if (isBlockTag(tag)) {
+      flushInline();
+      block(el, base);
+      continue;
+    }
+
+    // Inline element at root (e.g., <strong>text</strong>)
+    walkInline(el, base, pendingInline);
+  }
+
+  flushInline();
+
+  return paragraphs;
+}
+
+function buildConclusionSection(opts: { conclusionHtml: string; footerDate?: string | Date }) {
+  const htmlRaw = String(opts.conclusionHtml || "").trim();
+  if (!htmlRaw) return null;
+
+  // Convert HTML -> plain text with reliable line breaks, then format to match template page.
+  const text = __decodeHtmlEntities(htmlRaw)
+    // blocks
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<p[^>]*>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/li>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "• ")
+    .replace(/<\/(ul|ol)>/gi, "\n")
+    .replace(/<h[1-6][^>]*>/gi, "")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    // strip remaining tags
+    .replace(/<[^>]+>/g, "")
+    // remove odd checkbox / square glyphs that TinyMCE sometimes inserts
+    .replace(/[\u25A1\u25FB\u25FD\u25FE\u2610\u2611\u2612]+/g, "")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Split into logical lines
+  let lines = text.split("\n").map((s) => s.replace(/\s+/g, " ").trim());
+
+  // Remove empty lines at ends
+  while (lines.length && !lines[0]) lines.shift();
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+
+  // Remove duplicate title if present in content
+  const titleText = "Conclusion & Certification";
+  if (lines.length && lines[0].toLowerCase() === titleText.toLowerCase()) lines.shift();
+
+  // Normalize bullets: keep only bullet lines for the two main points
+  const isBullet = (s: string) => s.startsWith("• ") || s.startsWith("- ") || s.startsWith("•");
+  // Convert "-" bullets to "• "
+  lines = lines.map((s) => (s.startsWith("- ") ? `• ${s.slice(2).trim()}` : s));
+
+  const children: Paragraph[] = [];
+
+  // Title
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.LEFT,
+      spacing: { before: 0, after: 220 } as any,
+      children: [new TextRun({ text: "Conclusion & Certification", bold: true, size: 64, color: "111111" })],
+    })
+  );
+
+  // Build paragraphs with template spacing
+  for (const ln0 of lines) {
+    const ln = String(ln0 || "").trim();
+    if (!ln) {
+      children.push(new Paragraph({ spacing: { before: 0, after: 180 } as any, text: "" }));
+      continue;
+    }
+
+    // Bold label rows exactly like screenshot
+    const boldLine =
+      ln === "Issued By" ||
+      ln === "For and on behalf of:" ||
+      ln.startsWith("RACE LBI") ||
+      ln.startsWith("Date:") ||
+      ln.startsWith("Authorized Contact:") ||
+ln.startsWith("www.");
+
+    if (isBullet(ln)) {
+      const bulletText = ln.replace(/^•\s*/g, "").trim();
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: { before: 80, after: 120, line: 360 } as any,
+          indent: { left: 720, hanging: 360 } as any,
+          children: [
+            new TextRun({ text: "•  ", size: 48, color: "111111" }),
+            new TextRun({ text: bulletText, size: 48, color: "111111" }),
+          ],
+        })
+      );
+      continue;
+    }
+
+    // Normal paragraph
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: { before: 0, after: 140, line: 360 } as any,
+        children: [new TextRun({ text: ln, size: 48, bold: boldLine, color: "111111" })],
+      })
+    );
+  }
+
+  return {
+    properties: sectionPropsA3Landscape(),
+    footers: { default: buildFooterTablePages(opts.footerDate ?? new Date()) },
+    children,
+  };
+}
+
+
 async function buildDoc(opts: {
   supabase: any;
+  projectId?: string;
   includePhotos: boolean;
   fileName: string;
   points: any[];
   extraPhotoRefs?: string[];
   watermark?: WatermarkOptions;
   autoSave?: boolean;
+  footerDate?: string | Date;
+  projectName?: string;
+  cover?: CoverOptions;
 }): Promise<Blob> {
   const rows: TableRow[] = [makeHeaderRow()];
 
   let normalized = enrichPointsAlways(opts.points);
+  if (opts.extraPhotoRefs?.length) normalized = applyExtraPhotos(normalized, opts.extraPhotoRefs);
 
-  if (opts.extraPhotoRefs?.length) {
-    normalized = applyExtraPhotos(normalized, opts.extraPhotoRefs);
-  }
-
-  for (const p of normalized) {
-    rows.push(await makeBodyRow(opts.supabase, p, opts.includePhotos));
-  }
+  for (const p of normalized) rows.push(await makeBodyRow(opts.supabase, p, opts.includePhotos));
 
   const table = new Table({
     style: "Table Grid Light1",
@@ -1219,55 +3829,338 @@ async function buildDoc(opts: {
     columnWidths: GRID_COLS,
     rows,
     alignment: AlignmentType.CENTER as any,
+    indent: { size: 0, type: WidthType.DXA } as any,
   });
 
   const wmEnabled = !!opts.watermark?.enabled;
-  const wmText = (opts.watermark?.text || "").trim();
+  const projectName = (opts.projectName || "PROJECT").trim();
 
-  const doc = new Document({
-    sections: [
-      {
-        properties: {
-          page: {
-            size: { orientation: PageOrientation.LANDSCAPE },
-            margin: { left: 1440, right: 1440, top: 1418, bottom: 820, header: 720, footer: 720 } as any,
-            ...(pageBordersTSPL() as any),
-          } as any,
-        },
-        headers: wmEnabled ? { default: await buildHeaderWithDiagonalWatermark(wmText) } : undefined,
-        footers: wmEnabled ? { default: buildFooterExactLikeImage(wmText) } : undefined,
-        children: [table],
-      },
-    ],
+  const coverEnabled = opts.cover?.enabled ?? true;
+  const cover: CoverOptions = {
+    enabled: coverEnabled,
+    // Default to /images/logo_v2.png (common Next.js public/images placement)
+    logoUrl: opts.cover?.logoUrl ?? "/images/logo_v2.png",
+    logoWidth: opts.cover?.logoWidth ?? 390,
+    // Slightly shorter height to avoid stretching in Word header rendering
+    logoHeight: opts.cover?.logoHeight ?? 68,
+    rightTopText: opts.cover?.rightTopText ?? "",
+    topCenterText: opts.cover?.topCenterText ?? `${projectName} SUMMARY REPORT`,
+    // Label inside the blue outlined box on the cover page
+    recommendationText: opts.cover?.recommendationText ?? "SURVEY REPORT",
+    footerLeftText: opts.cover?.footerLeftText ?? "Report by RACE Innovations Pvt ltd",
+    footerEmail: opts.cover?.footerEmail ?? "kh@raceinnovations.in",
+    footerWebsite: opts.cover?.footerWebsite ?? "https://raceinnovations.in/",
+    datedLabel: opts.cover?.datedLabel ?? "Dated",
+    date: opts.cover?.date ?? opts.footerDate ?? new Date(),
+  };
+
+  const sections: any[] = [];
+
+  // Default logo-only header for all non-cover pages
+  const headerDefault = await buildLogoOnlyHeader(cover.logoUrl, 220, 38);
+
+  const headerPhotoTitle = await buildGATitleHeader({
+    logoUrl: cover.logoUrl,
+    projectName,
+    includeGATitle: false,
+    logoW: 220,
+    logoH: 38,
   });
 
-  const blob = await Packer.toBlob(doc);
 
-  if (opts.autoSave !== false) {
-    saveAs(blob, opts.fileName);
+  // ✅ COVER PAGE (A3 Landscape)
+  if (cover.enabled) {
+    sections.push({
+      properties: {
+        verticalAlign: VerticalAlign.CENTER,
+        page: {
+          // A3 LANDSCAPE: do NOT swap width/height; swapping can make Word open as portrait.
+          size: { width: A3_W, height: A3_H, orientation: PageOrientation.LANDSCAPE },
+          margin: COVER_MARGIN as any,
+          ...(pageBordersTSPL() as any),
+        } as any,
+      },
+      headers: { default: await buildLogoOnlyHeader(cover.logoUrl, cover.logoWidth ?? 220, cover.logoHeight ?? 38) },
+      footers: { default: buildCoverFooter(cover) },
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 0, after: 200 },
+          children: [
+            // User-required: First line title = 46pt => 92 half-points
+            new TextRun({ text: String(cover.topCenterText || "").trim().toUpperCase(), size: 92, color: "1F4E79" }),
+          ],
+        }),
+        // Keep the title block compact (reference uses less top whitespace).
+        new Paragraph({ spacing: { before: 120, after: 0 }, text: "" }),
+        coverTitleProject(projectName),
+        new Paragraph({ spacing: { before: 140, after: 0 }, text: "" }),
+        coverRecommendationBox(cover.recommendationText || "SURVEY REPORT"),
+      ],
+    });
   }
 
+  // ✅ Objective+Map + GA pages (if available)
+  try {
+    const pid = String(opts.projectId || "").trim();
+    if (pid) {
+      const setup = await getProjectRouteSetup(opts.supabase, pid);
+      if (setup) {
+        const mapBytes = setup.routeMapUrl ? await bytesFromUrlForDocx(setup.routeMapUrl) : null;
+        const gaUrls = (setup.gaImageUrls || []).filter(Boolean);
+        const gaBytesList: Uint8Array[] = [];
+        for (const u of gaUrls) {
+          try {
+            const b = await bytesFromUrlForDocx(u);
+            if (b) gaBytesList.push(b);
+          } catch {
+            // ignore per-image failure
+          }
+        }
+
+        const objectiveSec = await buildObjectiveRouteMapSection({
+            projectName,
+            objective: setup.objective || "—",
+            routeMapBytes: mapBytes,
+            routeLocations: (setup as any).locations || [],
+            footerDate: opts.footerDate ?? new Date(),
+          });
+        objectiveSec.headers = { default: headerDefault };
+        sections.push(objectiveSec);
+
+        const gaSecs = await buildGADrawingSections({
+          projectName,
+          gaDrawingBytesList: gaBytesList,
+          footerDate: opts.footerDate ?? new Date(),
+        });
+        // ✅ Keep ONLY titles at the top (near logo) without shifting the drawing.
+        // Titles are moved into the header for GA pages.
+        const gaHeaderFirst = await buildGATitleHeader({
+          logoUrl: cover.logoUrl,
+          projectName,
+          includeGATitle: true,
+          logoW: 220,
+          logoH: 38,
+        });
+        const gaHeaderNext = await buildGATitleHeader({
+          logoUrl: cover.logoUrl,
+          projectName,
+          includeGATitle: false,
+          logoW: 220,
+          logoH: 38,
+        });
+
+        for (let i = 0; i < gaSecs.length; i++) {
+          const s = gaSecs[i] as any;
+          s.headers = { default: i === 0 ? gaHeaderFirst : gaHeaderNext };
+          sections.push(s);
+        }
+
+
+
+        // ✅ CATEGORY STAGE SUMMARY (after GA Drawing)
+        try {
+          const countSec = await buildCategoryCountSummarySection({
+            projectName,
+            points: normalized,
+            footerDate: opts.footerDate ?? new Date(),
+          });
+          (countSec as any).headers = { default: headerDefault };
+          sections.push(countSec);
+        } catch {
+          // ignore count-summary failures
+        }
+
+        // ✅ LIST OF FOOTPATH BRIDGES / BRIDGES / etc. (after Category Stage Summary)
+        try {
+          const lastSec = await buildLastSummaryListsSection({
+            projectName,
+            points: normalized,
+            footerDate: opts.footerDate ?? new Date(),
+          });
+          (lastSec as any).headers = { default: headerDefault };
+          sections.push(lastSec);
+        } catch {
+          // ignore last-page failures
+        }
+
+
+
+// ✅ FULL-PAGE PHOTO PAGES (1 image = full width, 2 images = side-by-side)
+  try {
+    for (const p of normalized) {
+      const refs = (p.photo_refs || []).filter(Boolean).slice(0, 3);
+
+      if (refs.length === 0) continue;
+      if (refs.length === 1) {
+        const photoSec = await buildPhotoPageSection({
+          supabase: opts.supabase,
+          projectName,
+          p,
+          photoRefs: [refs[0]],
+          footerDate: opts.footerDate ?? new Date(),
+          watermarkEnabled: wmEnabled,
+        });
+        photoSec.headers = { default: headerPhotoTitle };
+        sections.push(photoSec);
+      } else if (refs.length === 2) {
+        const photoSec = await buildPhotoPageSection({
+          supabase: opts.supabase,
+          projectName,
+          p,
+          photoRefs: [refs[0], refs[1]],
+          footerDate: opts.footerDate ?? new Date(),
+          watermarkEnabled: wmEnabled,
+        });
+        photoSec.headers = { default: headerPhotoTitle };
+        sections.push(photoSec);
+      } else {
+        // 3 photos: first 2 on one page, last one on next page
+        const photoSec1 = await buildPhotoPageSection({
+          supabase: opts.supabase,
+          projectName,
+          p,
+          photoRefs: [refs[0], refs[1]],
+          footerDate: opts.footerDate ?? new Date(),
+          watermarkEnabled: wmEnabled,
+        });
+        photoSec1.headers = { default: headerPhotoTitle };
+        sections.push(photoSec1);
+
+        const photoSec2 = await buildPhotoPageSection({
+          supabase: opts.supabase,
+          projectName,
+          p,
+          photoRefs: [refs[2]],
+          footerDate: opts.footerDate ?? new Date(),
+          watermarkEnabled: wmEnabled,
+        });
+        photoSec2.headers = { default: headerPhotoTitle };
+        sections.push(photoSec2);
+      }
+    }
+  } catch {
+    // ignore photo-page failures
+  }
+
+
+      }
+    }
+  } catch {
+    // Do not break export if route setup fetch fails
+  }
+
+  const projectId = String(opts.projectId || "").trim();
+
+  // ✅ CONCLUSION & CERTIFICATION (last page)
+  // Pulls HTML from project_route_pages.conclusion_html (latest non-null row).
+  try {
+    const { data: lastPage } = await opts.supabase
+      .from("project_route_pages")
+      .select("conclusion_html, created_at")
+      .eq("project_id", projectId)
+      .not("conclusion_html", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const conclusionHtml = String((lastPage as any)?.conclusion_html || "").trim();
+    if (conclusionHtml) {
+      const conclusionSec = buildConclusionSection({
+        conclusionHtml,
+        footerDate: cover.date ?? opts.footerDate ?? new Date(),
+      });
+      if (conclusionSec) sections.push(conclusionSec);
+    }
+  } catch {
+    // ignore conclusion failures (do not block export)
+  }
+  // ✅ TABLE PAGES removed (user requested to delete that page)
+
+  const doc = new Document({ sections });
+
+  // ✅ Build docx bytes then patch true Word page borders (client-style)
+  const bytes = await Packer.toBuffer(doc);
+  const patched = await applyRedPageBordersToDocxBytes(bytes as any);
+  const blob = new Blob([patched], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+
+  if (opts.autoSave !== false) saveAs(blob, opts.fileName);
   return blob;
 }
 
 /** =========================
- * EXPORTED DOCX functions
+ * EXPORTED DOCX
  * ========================= */
 export async function downloadReportDOCX(supabase: any, reportId: string, opts: DownloadOpts = {}) {
   const includePhotos = opts.includePhotos ?? true;
 
-  const { points } = await getPointsForReport(supabase, reportId);
+  const { points, report } = await getPointsForReport(supabase, reportId);
   const extraPhotoRefs = includePhotos ? await getExtraPhotosForReport(supabase, reportId) : [];
+
+  let projectName = "Project";
+  let projectId: string | null = null;
+  try {
+    const pid = report?.project_id ?? report?.projectId;
+    if (pid) {
+      projectId = String(pid);
+      const { data: project } = await supabase.from("projects").select("*").eq("id", pid).single();
+      projectName = projectNameOf(project as any);
+    }
+  } catch {}
 
   await buildDoc({
     supabase,
+    projectId: projectId || undefined,
     includePhotos,
     fileName: opts.fileName || `report-${String(reportId).slice(0, 8)}.docx`,
     points,
     extraPhotoRefs,
     watermark: opts.watermark,
+    footerDate: report?.created_at || new Date(),
+    projectName,
+    cover: opts.cover,
   });
 }
+
+
+/** =========================
+ * ✅ EXPORTED PROJECTS CSV
+ * ========================= */
+export async function downloadProjectsCSV(
+  supabase: any,
+  opts: { fileName?: string; fields?: string[] } = {}
+) {
+  const fileName = opts.fileName || "projects.csv";
+  const fields = (opts.fields && opts.fields.length ? opts.fields : ["id", "name", "title", "project_name", "created_at"])
+    .map(String)
+    .filter(Boolean);
+
+  // Pull projects
+  const { data, error } = await supabase.from("projects").select("*").order("created_at", { ascending: false });
+  if (error) throw error;
+
+  const rows = Array.isArray(data) ? data : [];
+
+  function csvEscape(v: any) {
+    const s = (v === null || v === undefined) ? "" : String(v);
+    const needs = /[",\n\r]/.test(s);
+    const esc = s.replace(/"/g, '""');
+    return needs ? `"${esc}"` : esc;
+  }
+
+  const header = fields.join(",");
+  const body = rows
+    .map((r: any) => fields.map((f) => csvEscape(r?.[f])).join(","))
+    .join("\n");
+
+  const csv = header + "\n" + body;
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  saveAs(blob, fileName);
+  return { blob, fileName };
+}
+
 
 export async function generateProjectDOCX(
   supabase: any,
@@ -1287,28 +4180,39 @@ export async function generateProjectDOCX(
   if (rErr) throw rErr;
 
   const allPoints: any[] = [];
-  const allExtraPhotos: string[] = [];
 
   for (const r of (reports || []) as ReportRow[]) {
     const { points } = await getPointsForReport(supabase, r.id);
-    allPoints.push(...(points || []));
+    if (!Array.isArray(points) || !points.length) continue;
+
+    const firstPoint = enrichPointsAlways(points)[0];
 
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, r.id);
-      allExtraPhotos.push(...extra);
+      if (extra.length) {
+        firstPoint.photo_refs = Array.from(
+          new Set([...(firstPoint.photo_refs || []), ...extra])
+        ).slice(0, 3);
+      }
     }
+
+    allPoints.push(firstPoint);
   }
 
-  const fileName = opts.fileName || `${projectNameOf(project as ProjectRow)}-ALL-REPORTS.docx`;
+  const name = projectNameOf(project as ProjectRow);
+  const fileName = opts.fileName || `${name}-ALL-REPORTS.docx`;
 
   const blob = await buildDoc({
     supabase,
+    projectId,
     includePhotos,
     fileName,
     points: allPoints,
-    extraPhotoRefs: Array.from(new Set(allExtraPhotos)),
     watermark: opts.watermark,
     autoSave: false,
+    footerDate: new Date(),
+    projectName: name,
+    cover: opts.cover,
   });
 
   return { blob, fileName };
@@ -1326,16 +4230,23 @@ export async function generateProjectDOCXByReportIds(
   if (pErr) throw pErr;
 
   const allPoints: any[] = [];
-  const allExtraPhotos: string[] = [];
 
   for (const reportId of reportIds) {
     const { points } = await getPointsForReport(supabase, reportId);
-    allPoints.push(...(points || []));
+    if (!Array.isArray(points) || !points.length) continue;
+
+    const firstPoint = enrichPointsAlways(points)[0];
 
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, reportId);
-      allExtraPhotos.push(...extra);
+      if (extra.length) {
+        firstPoint.photo_refs = Array.from(
+          new Set([...(firstPoint.photo_refs || []), ...extra])
+        ).slice(0, 3);
+      }
     }
+
+    allPoints.push(firstPoint);
   }
 
   const name = projectNameOf(project as ProjectRow);
@@ -1343,19 +4254,22 @@ export async function generateProjectDOCXByReportIds(
 
   const blob = await buildDoc({
     supabase,
+    projectId,
     includePhotos,
     fileName,
     points: allPoints,
-    extraPhotoRefs: Array.from(new Set(allExtraPhotos)),
     watermark: opts.watermark,
     autoSave: false,
+    footerDate: new Date(),
+    projectName: name,
+    cover: opts.cover,
   });
 
   return { blob, fileName };
 }
 
 /** =========================
- * EXPORTED GPX functions
+ * EXPORTED GPX
  * ========================= */
 async function collectGpxPointsForReportId(supabase: any, reportId: string): Promise<GPXPoint[]> {
   const { points, report } = await getPointsForReport(supabase, reportId);
