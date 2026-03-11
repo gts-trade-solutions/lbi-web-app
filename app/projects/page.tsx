@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 import { downloadProjectsCSV } from "../../lib/download";
 
@@ -82,20 +83,20 @@ const CATEGORY_ALIAS_MAP: Record<string, string> = {
   "towerline cable": "Towerline Cable",
   "towerline cables": "Towerline Cable",
   "take diversion": "Take Diversion",
-  "diversion": "Take Diversion",
-  "diversions": "Take Diversion",
-  "towerline": "Towerline",
+  diversion: "Take Diversion",
+  diversions: "Take Diversion",
+  towerline: "Towerline",
   "tower line": "Towerline",
   "underpass bridge": "Underpass Bridge",
-  "underpass": "Underpass Bridge",
+  underpass: "Underpass Bridge",
   "tree branches": "Tree Branches",
   "tree branch": "Tree Branches",
-  "bridge": "Bridge",
-  "bridges": "Bridge",
+  bridge: "Bridge",
+  bridges: "Bridge",
   "petrol bunk": "Petrol bunk",
   "petrol bunks": "Petrol bunk",
   "petrol pump": "Petrol bunk",
-  "signboard": "Signboard",
+  signboard: "Signboard",
   "sign board": "Signboard",
   "sign boards": "Signboard",
   "electric sign board": "Electric Sign Board",
@@ -107,8 +108,8 @@ const CATEGORY_ALIAS_MAP: Record<string, string> = {
   "toll plazas": "Toll Plaza",
   "junction left": "Junction left",
   "left junction": "Junction left",
-  "bend": "Bend",
-  "bends": "Bend",
+  bend: "Bend",
+  bends: "Bend",
   "junction right": "Junction right",
   "right junction": "Junction right",
 };
@@ -325,6 +326,8 @@ function getDuplicates(values: string[]) {
 }
 
 export default function ProjectsPage() {
+  const router = useRouter();
+
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -363,6 +366,10 @@ export default function ProjectsPage() {
   const safeName = (p: ProjectRow) =>
     p.name || p.title || p.project_name || "Untitled Project";
 
+  const redirectToLogin = () => {
+    router.replace("/login");
+  };
+
   const load = async () => {
     setLoading(true);
     try {
@@ -379,6 +386,11 @@ export default function ProjectsPage() {
 
       if (!bulkProjectId && rows.length) setBulkProjectId(rows[0].id);
     } catch (e: any) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
+        redirectToLogin();
+        return;
+      }
       alert(e?.message || String(e));
     } finally {
       setLoading(false);
@@ -386,11 +398,46 @@ export default function ProjectsPage() {
   };
 
   useEffect(() => {
-    load();
+    const init = async () => {
+      try {
+        const {
+          data: { session },
+          error,
+        } = await supabase.auth.getSession();
+
+        if (error) throw error;
+
+        if (!session?.user) {
+          redirectToLogin();
+          return;
+        }
+
+        await load();
+      } catch {
+        redirectToLogin();
+      }
+    };
+
+    init();
+  }, []);
+
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT") {
+        redirectToLogin();
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   const logout = async () => {
     await supabase.auth.signOut();
+    redirectToLogin();
   };
 
   const exportCSV = async () => {
@@ -445,15 +492,18 @@ export default function ProjectsPage() {
       setCreating(true);
 
       const {
-        data: { user },
-        error: userErr,
-      } = await supabase.auth.getUser();
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
 
-      if (userErr) throw userErr;
-      if (!user) {
-        alert("You are not logged in. Please log in again.");
+      if (sessionErr) throw sessionErr;
+
+      if (!session?.user) {
+        redirectToLogin();
         return;
       }
+
+      const user = session.user;
 
       const { error } = await supabase.from("projects").insert([
         {
@@ -472,6 +522,11 @@ export default function ProjectsPage() {
       setNewDesc("");
       await load();
     } catch (e: any) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
+        redirectToLogin();
+        return;
+      }
       alert(e?.message || String(e));
     } finally {
       setCreating(false);
@@ -548,6 +603,17 @@ export default function ProjectsPage() {
     const errors: string[] = [];
 
     try {
+      const {
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
+
+      if (sessionErr) throw sessionErr;
+      if (!session?.user) {
+        redirectToLogin();
+        return;
+      }
+
       const [pointsText, imageMapText] = await Promise.all([
         readTextFile(pointsFile),
         readTextFile(imageMapFile),
@@ -580,7 +646,9 @@ export default function ProjectsPage() {
 
       if (invalidCategories.length) {
         throw new Error(
-          `Invalid categories in points CSV.\n\nAllowed categories:\n${CATEGORY_OPTIONS.join(", ")}\n\nInvalid rows:\n${invalidCategories.join("\n")}`
+          `Invalid categories in points CSV.\n\nAllowed categories:\n${CATEGORY_OPTIONS.join(
+            ", "
+          )}\n\nInvalid rows:\n${invalidCategories.join("\n")}`
         );
       }
 
@@ -607,7 +675,9 @@ export default function ProjectsPage() {
 
       if (missingPointKeysInPointsCsv.length) {
         throw new Error(
-          `These point_key values are used in mapping CSV but missing in points CSV: ${missingPointKeysInPointsCsv.join(", ")}`
+          `These point_key values are used in mapping CSV but missing in points CSV: ${missingPointKeysInPointsCsv.join(
+            ", "
+          )}`
         );
       }
 
@@ -818,8 +888,17 @@ export default function ProjectsPage() {
         invalidCategories,
       });
 
-      alert(errors.length ? "Bulk import completed with some warnings/errors. Check summary." : "Bulk import completed.");
+      alert(
+        errors.length
+          ? "Bulk import completed with some warnings/errors. Check summary."
+          : "Bulk import completed."
+      );
     } catch (e: any) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
+        redirectToLogin();
+        return;
+      }
       alert(e?.message || String(e));
     } finally {
       setImporting(false);
@@ -976,7 +1055,14 @@ export default function ProjectsPage() {
       {bulkOpen && (
         <div style={styles.modalOverlay} onClick={() => setBulkOpen(false)}>
           <div style={styles.modalWide} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
               <div style={{ fontSize: 18, fontWeight: 800 }}>
                 Bulk Import (GPS + Images)
               </div>
@@ -993,7 +1079,14 @@ export default function ProjectsPage() {
               Files not mapped / NO_GPS → stored under <b>NO_GPS Images</b> report automatically.
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+                marginTop: 12,
+              }}
+            >
               <div>
                 <div style={styles.formLabel}>Select Project</div>
                 <select
@@ -1024,7 +1117,14 @@ export default function ProjectsPage() {
               <div style={styles.categoryHelpBox}>{CATEGORY_OPTIONS.join(" • ")}</div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+                marginTop: 12,
+              }}
+            >
               <div>
                 <div style={styles.formLabel}>Points CSV file</div>
                 <input
@@ -1033,7 +1133,11 @@ export default function ProjectsPage() {
                   accept=".csv,.txt"
                   onChange={handlePointsFileChange}
                 />
-                {pointsFile && <div style={styles.fileMeta}>{pointsFile.name} • {pointsFile.size} bytes</div>}
+                {pointsFile && (
+                  <div style={styles.fileMeta}>
+                    {pointsFile.name} • {pointsFile.size} bytes
+                  </div>
+                )}
                 {pointsPreview && <pre style={styles.previewBox}>{pointsPreview}</pre>}
               </div>
 
@@ -1045,7 +1149,11 @@ export default function ProjectsPage() {
                   accept=".csv,.txt"
                   onChange={handleImageMapFileChange}
                 />
-                {imageMapFile && <div style={styles.fileMeta}>{imageMapFile.name} • {imageMapFile.size} bytes</div>}
+                {imageMapFile && (
+                  <div style={styles.fileMeta}>
+                    {imageMapFile.name} • {imageMapFile.size} bytes
+                  </div>
+                )}
                 {imageMapPreview && <pre style={styles.previewBox}>{imageMapPreview}</pre>}
               </div>
             </div>
@@ -1084,7 +1192,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>Invalid categories:</b>
                     <div style={styles.scrollBox}>
-                      {summary.invalidCategories.map((f) => <div key={f}>{f}</div>)}
+                      {summary.invalidCategories.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1093,7 +1203,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>Duplicate selected image names:</b>
                     <div style={styles.scrollBox}>
-                      {summary.duplicateSelectedImages.map((f) => <div key={f}>{f}</div>)}
+                      {summary.duplicateSelectedImages.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1102,7 +1214,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>Duplicate mapping CSV file_name values:</b>
                     <div style={styles.scrollBox}>
-                      {summary.duplicateMappingFiles.map((f) => <div key={f}>{f}</div>)}
+                      {summary.duplicateMappingFiles.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1111,7 +1225,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>point_key in mapping CSV but missing in points CSV:</b>
                     <div style={styles.scrollBox}>
-                      {summary.missingPointKeysInPointsCsv.map((f) => <div key={f}>{f}</div>)}
+                      {summary.missingPointKeysInPointsCsv.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1120,7 +1236,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#7A5AF8", fontSize: 13 }}>
                     <b>NO_GPS images:</b>
                     <div style={styles.scrollBox}>
-                      {summary.noGpsImages.map((f) => <div key={f}>{f}</div>)}
+                      {summary.noGpsImages.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1129,7 +1247,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>In mapping CSV but not selected:</b>
                     <div style={styles.scrollBox}>
-                      {summary.missingFilesInUpload.map((f) => <div key={f}>{f}</div>)}
+                      {summary.missingFilesInUpload.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1138,7 +1258,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#475467", fontSize: 13 }}>
                     <b>Selected images not in mapping (treated as NO_GPS):</b>
                     <div style={styles.scrollBox}>
-                      {summary.extraFilesNotInMap.map((f) => <div key={f}>{f}</div>)}
+                      {summary.extraFilesNotInMap.map((f) => (
+                        <div key={f}>{f}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1147,7 +1269,9 @@ export default function ProjectsPage() {
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>Errors / Warnings:</b>
                     <div style={styles.scrollBox}>
-                      {summary.errors.map((e, idx) => <div key={idx}>{e}</div>)}
+                      {summary.errors.map((e, idx) => (
+                        <div key={idx}>{e}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1155,7 +1279,11 @@ export default function ProjectsPage() {
             )}
 
             <div style={styles.modalActions}>
-              <button style={styles.btnGhost} onClick={() => setBulkOpen(false)} disabled={importing}>
+              <button
+                style={styles.btnGhost}
+                onClick={() => setBulkOpen(false)}
+                disabled={importing}
+              >
                 Close
               </button>
               <button
