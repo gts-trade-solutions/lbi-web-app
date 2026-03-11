@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import * as XLSX from "xlsx";
 import { supabase } from "../../lib/supabaseClient";
 import { downloadProjectsCSV } from "../../lib/download";
 
@@ -24,6 +25,7 @@ type ParsedPointRow = {
   latitude: number;
   longitude: number;
   category: string;
+  normalizedCategory?: string | null;
   description?: string | null;
 };
 
@@ -72,46 +74,92 @@ const CATEGORY_OPTIONS = [
 const CATEGORY_ALIAS_MAP: Record<string, string> = {
   "footpath bridge": "Footpath Bridge",
   "footpathbridge": "Footpath Bridge",
+  "foot bridge": "Footpath Bridge",
+  "pedestrian bridge": "Footpath Bridge",
+
   "low tension cable": "Low Tension Cable",
+  "low tension cables": "Low Tension Cable",
   "lt cable": "Low Tension Cable",
   "lt cables": "Low Tension Cable",
-  "low tension cables": "Low Tension Cable",
+  "lt line": "Low Tension Cable",
+  "lt lines": "Low Tension Cable",
+
   "high tension cable": "High Tension Cable",
+  "high tension cables": "High Tension Cable",
   "ht cable": "High Tension Cable",
   "ht cables": "High Tension Cable",
-  "high tension cables": "High Tension Cable",
+  "ht line": "High Tension Cable",
+  "ht lines": "High Tension Cable",
+
   "towerline cable": "Towerline Cable",
   "towerline cables": "Towerline Cable",
+  "tower line cable": "Towerline Cable",
+  "tower line cables": "Towerline Cable",
+
   "take diversion": "Take Diversion",
   diversion: "Take Diversion",
   diversions: "Take Diversion",
+  "take diversions": "Take Diversion",
+
   towerline: "Towerline",
   "tower line": "Towerline",
+  "tower lines": "Towerline",
+  "transmission tower": "Towerline",
+
   "underpass bridge": "Underpass Bridge",
   underpass: "Underpass Bridge",
+  "under bridge": "Underpass Bridge",
+
   "tree branches": "Tree Branches",
   "tree branch": "Tree Branches",
+  branches: "Tree Branches",
+  tree: "Tree Branches",
+
   bridge: "Bridge",
   bridges: "Bridge",
+  flyover: "Bridge",
+
   "petrol bunk": "Petrol bunk",
   "petrol bunks": "Petrol bunk",
   "petrol pump": "Petrol bunk",
+  "fuel station": "Petrol bunk",
+  "fuel bunk": "Petrol bunk",
+
   signboard: "Signboard",
+  signboards: "Signboard",
   "sign board": "Signboard",
   "sign boards": "Signboard",
+  "road sign": "Signboard",
+
   "electric sign board": "Electric Sign Board",
   "electric signboard": "Electric Sign Board",
   "electric sign boards": "Electric Sign Board",
+  "electrical sign board": "Electric Sign Board",
+  "illuminated sign board": "Electric Sign Board",
+
   "camera pole": "Camera Pole",
   "camera poles": "Camera Pole",
+  "cctv pole": "Camera Pole",
+  "surveillance pole": "Camera Pole",
+
   "toll plaza": "Toll Plaza",
   "toll plazas": "Toll Plaza",
+  toll: "Toll Plaza",
+
   "junction left": "Junction left",
   "left junction": "Junction left",
+  "left turn junction": "Junction left",
+  "left turn": "Junction left",
+
   bend: "Bend",
   bends: "Bend",
+  curve: "Bend",
+  curves: "Bend",
+
   "junction right": "Junction right",
   "right junction": "Junction right",
+  "right turn junction": "Junction right",
+  "right turn": "Junction right",
 };
 
 function normalizeHeader(h: string) {
@@ -128,14 +176,18 @@ function stripBom(text: string) {
 
 function normalizeCategoryName(input: string) {
   const raw = String(input || "").trim();
-  if (!raw) return "";
+  if (!raw) return "Unknown";
 
-  const lowered = raw.toLowerCase().replace(/\s+/g, " ").trim();
+  const lowered = raw
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   const exact = CATEGORY_OPTIONS.find((x) => x.toLowerCase() === lowered);
   if (exact) return exact;
 
-  return CATEGORY_ALIAS_MAP[lowered] || "";
+  return CATEGORY_ALIAS_MAP[lowered] || raw;
 }
 
 function parseCSVLike(text: string) {
@@ -164,8 +216,48 @@ function colIndex(headers: string[], names: string[]) {
   return -1;
 }
 
-function parsePoints(text: string): ParsedPointRow[] {
-  const { headers, rows } = parseCSVLike(text);
+function isExcelFile(file: File) {
+  const name = file.name.toLowerCase();
+  return name.endsWith(".xlsx") || name.endsWith(".xls");
+}
+
+async function readWorkbookRows(file: File): Promise<string[][]> {
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: "array" });
+
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) return [];
+
+  const sheet = workbook.Sheets[firstSheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: false,
+    defval: "",
+  }) as any[][];
+
+  return rows.map((row) => row.map((cell) => String(cell ?? "").trim()));
+}
+
+async function readStructuredFile(file: File) {
+  if (isExcelFile(file)) {
+    const rows = await readWorkbookRows(file);
+    if (!rows.length) return { headers: [] as string[], rows: [] as string[][] };
+
+    const headers = rows[0].map((h) => normalizeHeader(String(h || "")));
+    const dataRows = rows
+      .slice(1)
+      .filter((r) => r.some((c) => String(c || "").trim() !== ""))
+      .map((r) => r.map((c) => String(c || "").trim()));
+
+    return { headers, rows: dataRows };
+  }
+
+  const text = await readTextFile(file);
+  return parseCSVLike(text);
+}
+
+async function parsePoints(file: File): Promise<ParsedPointRow[]> {
+  const { headers, rows } = await readStructuredFile(file);
   if (!headers.length) return [];
 
   const iKey = colIndex(headers, ["point_key", "point", "seq", "key"]);
@@ -175,10 +267,13 @@ function parsePoints(text: string): ParsedPointRow[] {
   const iDesc = colIndex(headers, ["description", "report_description", "desc"]);
 
   if (iKey < 0 || iLat < 0 || iLon < 0 || iCat < 0) {
-    throw new Error("Points CSV must include headers: point_key, latitude, longitude, category");
+    throw new Error(
+      "Points file must include headers: point_key, latitude, longitude, category"
+    );
   }
 
   const out: ParsedPointRow[] = [];
+
   for (const r of rows) {
     const key = (r[iKey] ?? "").trim();
     if (!key) continue;
@@ -188,13 +283,14 @@ function parsePoints(text: string): ParsedPointRow[] {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
 
     const rawCategory = (r[iCat] ?? "").trim();
-    const normalizedCategory = normalizeCategoryName(rawCategory);
+    const finalCategory = normalizeCategoryName(rawCategory);
 
     out.push({
       point_key: key,
       latitude: lat,
       longitude: lon,
-      category: normalizedCategory || rawCategory,
+      category: finalCategory || "Unknown",
+      normalizedCategory: finalCategory || null,
       description: iDesc >= 0 ? ((r[iDesc] ?? "").trim() || null) : null,
     });
   }
@@ -202,8 +298,8 @@ function parsePoints(text: string): ParsedPointRow[] {
   return out;
 }
 
-function parseImageMap(text: string): ParsedImageMapRow[] {
-  const { headers, rows } = parseCSVLike(text);
+async function parseImageMap(file: File): Promise<ParsedImageMapRow[]> {
+  const { headers, rows } = await readStructuredFile(file);
   if (!headers.length) return [];
 
   const iFile = colIndex(headers, ["file_name", "filename", "file", "name"]);
@@ -211,7 +307,7 @@ function parseImageMap(text: string): ParsedImageMapRow[] {
   const iImgKey = colIndex(headers, ["image_key", "imagekey", "img_key", "imgkey"]);
 
   if (iFile < 0) {
-    throw new Error("Images mapping CSV must include header: file_name");
+    throw new Error("Images mapping file must include header: file_name");
   }
 
   const out: ParsedImageMapRow[] = [];
@@ -557,8 +653,17 @@ export default function ProjectsPage() {
     }
 
     try {
-      const text = await readTextFile(file);
-      setPointsPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
+      if (isExcelFile(file)) {
+        const { headers, rows } = await readStructuredFile(file);
+        const previewLines = [
+          headers.join(", "),
+          ...rows.slice(0, 5).map((r) => r.join(", ")),
+        ];
+        setPointsPreview(previewLines.join("\n"));
+      } else {
+        const text = await readTextFile(file);
+        setPointsPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
+      }
     } catch (err: any) {
       setPointsPreview("");
       alert(err?.message || String(err));
@@ -576,8 +681,17 @@ export default function ProjectsPage() {
     }
 
     try {
-      const text = await readTextFile(file);
-      setImageMapPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
+      if (isExcelFile(file)) {
+        const { headers, rows } = await readStructuredFile(file);
+        const previewLines = [
+          headers.join(", "),
+          ...rows.slice(0, 5).map((r) => r.join(", ")),
+        ];
+        setImageMapPreview(previewLines.join("\n"));
+      } else {
+        const text = await readTextFile(file);
+        setImageMapPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
+      }
     } catch (err: any) {
       setImageMapPreview("");
       alert(err?.message || String(err));
@@ -593,8 +707,8 @@ export default function ProjectsPage() {
   const runImportOptionA = async () => {
     if (!bulkProjectId) return alert("Select a project.");
     if (!bucketName.trim()) return alert("Bucket name is required.");
-    if (!pointsFile) return alert("Select Points CSV file.");
-    if (!imageMapFile) return alert("Select Images Mapping CSV file.");
+    if (!pointsFile) return alert("Select Points file.");
+    if (!imageMapFile) return alert("Select Images Mapping file.");
     if (!imageFiles.length) return alert("Select image files (bulk).");
 
     setImporting(true);
@@ -614,42 +728,24 @@ export default function ProjectsPage() {
         return;
       }
 
-      const [pointsText, imageMapText] = await Promise.all([
-        readTextFile(pointsFile),
-        readTextFile(imageMapFile),
+      const [points, imageMap] = await Promise.all([
+        parsePoints(pointsFile),
+        parseImageMap(imageMapFile),
       ]);
 
-      const points = parsePoints(pointsText);
-      const imageMap = parseImageMap(imageMapText);
-
-      if (!points.length) throw new Error("No valid points found in Points CSV.");
-      if (!imageMap.length) throw new Error("No valid rows found in Images Mapping CSV.");
+      if (!points.length) throw new Error("No valid points found in Points file.");
+      if (!imageMap.length) throw new Error("No valid rows found in Images Mapping file.");
 
       const duplicateSelectedImages = getDuplicates(imageFiles.map((f) => f.name));
       const duplicateMappingFiles = getDuplicates(imageMap.map((r) => r.file_name));
-
-      const invalidCategories = Array.from(
-        new Set(
-          points
-            .filter((p) => !normalizeCategoryName(p.category))
-            .map((p) => `${p.point_key}: ${p.category}`)
-        )
-      );
+      const invalidCategories: string[] = [];
 
       if (duplicateSelectedImages.length) {
         errors.push(`Duplicate selected image names found: ${duplicateSelectedImages.join(", ")}`);
       }
 
       if (duplicateMappingFiles.length) {
-        errors.push(`Duplicate file_name values found in mapping CSV: ${duplicateMappingFiles.join(", ")}`);
-      }
-
-      if (invalidCategories.length) {
-        throw new Error(
-          `Invalid categories in points CSV.\n\nAllowed categories:\n${CATEGORY_OPTIONS.join(
-            ", "
-          )}\n\nInvalid rows:\n${invalidCategories.join("\n")}`
-        );
+        errors.push(`Duplicate file_name values found in mapping file: ${duplicateMappingFiles.join(", ")}`);
       }
 
       const pointByKey = new Map<string, ParsedPointRow>();
@@ -675,7 +771,7 @@ export default function ProjectsPage() {
 
       if (missingPointKeysInPointsCsv.length) {
         throw new Error(
-          `These point_key values are used in mapping CSV but missing in points CSV: ${missingPointKeysInPointsCsv.join(
+          `These point_key values are used in mapping file but missing in points file: ${missingPointKeysInPointsCsv.join(
             ", "
           )}`
         );
@@ -735,9 +831,7 @@ export default function ProjectsPage() {
 
       for (const key of sortedKeys) {
         const p = pointByKey.get(key)!;
-        const category = p.category.trim();
-        if (!category) throw new Error(`Missing category for point_key=${key}.`);
-
+        const category = p.category.trim() || "Unknown";
         const description = p.description && p.description.trim() ? p.description.trim() : null;
 
         const { data: found, error: fErr } = await supabase
@@ -773,6 +867,7 @@ export default function ProjectsPage() {
         }
 
         if (!reportId) throw new Error(`Failed to create/find report for point_key=${key}`);
+
         reportIdByPointKey.set(key, reportId);
 
         const { error: delErr } = await supabase
@@ -1072,9 +1167,14 @@ export default function ProjectsPage() {
             </div>
 
             <div style={{ marginTop: 10, fontSize: 13, color: "#475467", lineHeight: 1.55 }}>
-              <b>Points CSV:</b> point_key, latitude, longitude, category (optional: description)
+              <b>Points File:</b> point_key, latitude, longitude, category (optional:
+              description)
               <br />
-              <b>Images CSV:</b> file_name, point_key (optional: image_key 6.1, 6.2...)
+              <b>Images File:</b> file_name, point_key (optional: image_key 6.1, 6.2...)
+              <br />
+              Supports <b>CSV, TXT, XLSX, XLS</b>.
+              <br />
+              Any category is allowed. Known categories are normalized automatically.
               <br />
               Files not mapped / NO_GPS → stored under <b>NO_GPS Images</b> report automatically.
             </div>
@@ -1113,8 +1213,11 @@ export default function ProjectsPage() {
             </div>
 
             <div style={{ marginTop: 10 }}>
-              <div style={styles.formLabel}>Allowed Categories</div>
-              <div style={styles.categoryHelpBox}>{CATEGORY_OPTIONS.join(" • ")}</div>
+              <div style={styles.formLabel}>Category Handling</div>
+              <div style={styles.categoryHelpBox}>
+                Known categories are normalized automatically. New or custom categories are
+                also allowed and will be imported as entered.
+              </div>
             </div>
 
             <div
@@ -1126,11 +1229,11 @@ export default function ProjectsPage() {
               }}
             >
               <div>
-                <div style={styles.formLabel}>Points CSV file</div>
+                <div style={styles.formLabel}>Points file</div>
                 <input
                   ref={pointsInputRef}
                   type="file"
-                  accept=".csv,.txt"
+                  accept=".csv,.txt,.xlsx,.xls"
                   onChange={handlePointsFileChange}
                 />
                 {pointsFile && (
@@ -1142,11 +1245,11 @@ export default function ProjectsPage() {
               </div>
 
               <div>
-                <div style={styles.formLabel}>Images Mapping CSV file</div>
+                <div style={styles.formLabel}>Images Mapping file</div>
                 <input
                   ref={mapInputRef}
                   type="file"
-                  accept=".csv,.txt"
+                  accept=".csv,.txt,.xlsx,.xls"
                   onChange={handleImageMapFileChange}
                 />
                 {imageMapFile && (
@@ -1188,17 +1291,6 @@ export default function ProjectsPage() {
                   report_photos inserted: <b>{summary.photosInserted}</b>
                 </div>
 
-                {summary.invalidCategories.length > 0 && (
-                  <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>Invalid categories:</b>
-                    <div style={styles.scrollBox}>
-                      {summary.invalidCategories.map((f) => (
-                        <div key={f}>{f}</div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
                 {summary.duplicateSelectedImages.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
                     <b>Duplicate selected image names:</b>
@@ -1212,7 +1304,7 @@ export default function ProjectsPage() {
 
                 {summary.duplicateMappingFiles.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>Duplicate mapping CSV file_name values:</b>
+                    <b>Duplicate mapping file_name values:</b>
                     <div style={styles.scrollBox}>
                       {summary.duplicateMappingFiles.map((f) => (
                         <div key={f}>{f}</div>
@@ -1223,7 +1315,7 @@ export default function ProjectsPage() {
 
                 {summary.missingPointKeysInPointsCsv.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>point_key in mapping CSV but missing in points CSV:</b>
+                    <b>point_key in mapping file but missing in points file:</b>
                     <div style={styles.scrollBox}>
                       {summary.missingPointKeysInPointsCsv.map((f) => (
                         <div key={f}>{f}</div>
@@ -1245,7 +1337,7 @@ export default function ProjectsPage() {
 
                 {summary.missingFilesInUpload.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>In mapping CSV but not selected:</b>
+                    <b>In mapping file but not selected:</b>
                     <div style={styles.scrollBox}>
                       {summary.missingFilesInUpload.map((f) => (
                         <div key={f}>{f}</div>
