@@ -7,6 +7,7 @@ import { downloadProjectsCSV } from "../../lib/download";
 
 type ProjectRow = {
   id: string;
+  user_id?: string | null;
   name?: string | null;
   title?: string | null;
   project_name?: string | null;
@@ -442,10 +443,25 @@ export default function ProjectsPage() {
 
     try {
       setCreating(true);
+
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser();
+
+      if (userErr) throw userErr;
+      if (!user) {
+        alert("You are not logged in. Please log in again.");
+        return;
+      }
+
       const { error } = await supabase.from("projects").insert([
         {
+          user_id: user.id,
           name,
-          description: newDesc.trim(),
+          description: newDesc.trim() || null,
+          created_by: user.id,
+          last_modified_by: user.id,
         },
       ]);
 
@@ -594,6 +610,7 @@ export default function ProjectsPage() {
           `These point_key values are used in mapping CSV but missing in points CSV: ${missingPointKeysInPointsCsv.join(", ")}`
         );
       }
+
       let noGpsReportId: string | null = null;
 
       async function getOrCreateNoGpsReport() {
@@ -638,7 +655,7 @@ export default function ProjectsPage() {
         return noGpsReportId;
       }
 
-const reportIdByPointKey = new Map<string, string>();
+      const reportIdByPointKey = new Map<string, string>();
       const sortedKeys = Array.from(pointByKey.keys()).sort((a, b) => {
         const na = Number(a);
         const nb = Number(b);
@@ -1157,40 +1174,223 @@ const reportIdByPointKey = new Map<string, string>();
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  page: { padding: 24, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif", background: "#F7F8FA", minHeight: "100vh", maxWidth: 1400, margin: "0 auto" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", background: "#fff", border: "1px solid #EAECF0", borderRadius: 16, padding: 16, boxShadow: "0 1px 2px rgba(16,24,40,0.06)" },
+  page: {
+    padding: 24,
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+    background: "#F7F8FA",
+    minHeight: "100vh",
+    maxWidth: 1400,
+    margin: "0 auto",
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+    flexWrap: "wrap",
+    background: "#fff",
+    border: "1px solid #EAECF0",
+    borderRadius: 16,
+    padding: 16,
+    boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
+  },
   title: { fontSize: 22, fontWeight: 800, color: "#101828", lineHeight: 1.2 },
   subtitle: { fontSize: 13, color: "#667085", marginTop: 6 },
-  headerRight: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" },
+  headerRight: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+  },
   exportGroup: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" },
-  btnPrimary: { padding: "10px 12px", borderRadius: 12, border: "1px solid #111", background: "#111", color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 },
-  btnGhost: { padding: "10px 12px", borderRadius: 12, border: "1px solid #EAECF0", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13, color: "#344054" },
-  btnDanger: { padding: "10px 12px", borderRadius: 12, border: "1px solid #FDA29B", background: "#FEF3F2", cursor: "pointer", fontWeight: 700, fontSize: 13, color: "#B42318" },
+  btnPrimary: {
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #111",
+    background: "#111",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+  },
+  btnGhost: {
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #EAECF0",
+    background: "#fff",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+    color: "#344054",
+  },
+  btnDanger: {
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #FDA29B",
+    background: "#FEF3F2",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13,
+    color: "#B42318",
+  },
   searchBar: { marginTop: 14, marginBottom: 14 },
-  searchWrap: { display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #EAECF0", borderRadius: 14, padding: "10px 12px", boxShadow: "0 1px 2px rgba(16,24,40,0.06)" },
+  searchWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    background: "#fff",
+    border: "1px solid #EAECF0",
+    borderRadius: 14,
+    padding: "10px 12px",
+    boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
+  },
   searchIcon: { color: "#667085", fontSize: 14 },
   searchInput: { flex: 1, border: "none", outline: "none", fontSize: 14, color: "#101828" },
-  clearBtn: { padding: "8px 10px", borderRadius: 10, border: "1px solid #EAECF0", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 12, color: "#344054" },
-  stateBox: { background: "#fff", border: "1px solid #EAECF0", borderRadius: 16, padding: 18, boxShadow: "0 1px 2px rgba(16,24,40,0.06)" },
+  clearBtn: {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid #EAECF0",
+    background: "#fff",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 12,
+    color: "#344054",
+  },
+  stateBox: {
+    background: "#fff",
+    border: "1px solid #EAECF0",
+    borderRadius: 16,
+    padding: 18,
+    boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
+  },
   grid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 },
-  card: { background: "#fff", border: "1px solid #EAECF0", borderRadius: 16, padding: 14, textDecoration: "none", color: "#101828", boxShadow: "0 1px 2px rgba(16,24,40,0.06)" },
-  cardTop: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 10 },
+  card: {
+    background: "#fff",
+    border: "1px solid #EAECF0",
+    borderRadius: 16,
+    padding: 14,
+    textDecoration: "none",
+    color: "#101828",
+    boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
+  },
+  cardTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 10,
+    marginBottom: 10,
+  },
   cardTitle: { fontSize: 16, fontWeight: 800, lineHeight: 1.2 },
-  badge: { fontSize: 12, fontWeight: 800, padding: "4px 10px", borderRadius: 999, border: "1px solid #D0D5DD", background: "#F9FAFB", color: "#344054", whiteSpace: "nowrap" },
-  metaRow: { display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px dashed #EAECF0" },
+  badge: {
+    fontSize: 12,
+    fontWeight: 800,
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid #D0D5DD",
+    background: "#F9FAFB",
+    color: "#344054",
+    whiteSpace: "nowrap",
+  },
+  metaRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "8px 0",
+    borderTop: "1px dashed #EAECF0",
+  },
   metaLabel: { fontSize: 12, color: "#667085", fontWeight: 700 },
-  metaValue: { fontSize: 12, color: "#101828", fontWeight: 700, maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  metaValue: {
+    fontSize: 12,
+    color: "#101828",
+    fontWeight: 700,
+    maxWidth: 190,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
   cardHint: { marginTop: 10, fontSize: 12, color: "#475467", fontWeight: 700 },
-  modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 9999 },
-  modal: { width: "min(640px, 100%)", background: "#fff", borderRadius: 16, border: "1px solid #EAECF0", padding: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.15)" },
-  modalWide: { width: "min(980px, 100%)", background: "#fff", borderRadius: 16, border: "1px solid #EAECF0", padding: 16, boxShadow: "0 10px 30px rgba(0,0,0,0.15)", maxHeight: "90vh", overflow: "auto" },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.35)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    zIndex: 9999,
+  },
+  modal: {
+    width: "min(640px, 100%)",
+    background: "#fff",
+    borderRadius: 16,
+    border: "1px solid #EAECF0",
+    padding: 16,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
+  },
+  modalWide: {
+    width: "min(980px, 100%)",
+    background: "#fff",
+    borderRadius: 16,
+    border: "1px solid #EAECF0",
+    padding: 16,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
+    maxHeight: "90vh",
+    overflow: "auto",
+  },
   formRow: { marginTop: 10 },
   formLabel: { fontSize: 12, fontWeight: 800, color: "#344054", marginBottom: 6 },
-  input: { width: "100%", padding: "10px 12px", borderRadius: 12, border: "1px solid #D0D5DD", outline: "none", fontSize: 14 },
-  textarea: { width: "100%", padding: "10px 12px", borderRadius: 12, border: "1px solid #D0D5DD", outline: "none", fontSize: 14, minHeight: 90, resize: "vertical" },
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #D0D5DD",
+    outline: "none",
+    fontSize: 14,
+  },
+  textarea: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid #D0D5DD",
+    outline: "none",
+    fontSize: 14,
+    minHeight: 90,
+    resize: "vertical",
+  },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 14 },
-  scrollBox: { maxHeight: 160, overflow: "auto", marginTop: 6, border: "1px solid #EAECF0", borderRadius: 10, padding: 8, background: "#fff" },
+  scrollBox: {
+    maxHeight: 160,
+    overflow: "auto",
+    marginTop: 6,
+    border: "1px solid #EAECF0",
+    borderRadius: 10,
+    padding: 8,
+    background: "#fff",
+  },
   fileMeta: { marginTop: 6, fontSize: 12, color: "#667085" },
-  previewBox: { marginTop: 8, background: "#F8FAFC", border: "1px solid #EAECF0", borderRadius: 10, padding: 10, fontSize: 12, lineHeight: 1.5, color: "#101828", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 140, overflow: "auto" },
-  categoryHelpBox: { marginTop: 4, background: "#F8FAFC", border: "1px solid #EAECF0", borderRadius: 10, padding: 10, fontSize: 12, lineHeight: 1.6, color: "#101828" },
+  previewBox: {
+    marginTop: 8,
+    background: "#F8FAFC",
+    border: "1px solid #EAECF0",
+    borderRadius: 10,
+    padding: 10,
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#101828",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    maxHeight: 140,
+    overflow: "auto",
+  },
+  categoryHelpBox: {
+    marginTop: 4,
+    background: "#F8FAFC",
+    border: "1px solid #EAECF0",
+    borderRadius: 10,
+    padding: 10,
+    fontSize: 12,
+    lineHeight: 1.6,
+    color: "#101828",
+  },
 };
