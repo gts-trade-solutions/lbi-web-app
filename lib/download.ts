@@ -137,34 +137,47 @@ function parseNEToDecimal(ne: string): { lat: number; lon: number } | null {
     .replace(/\n/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
   if (!t) return null;
 
-  const m = t.match(
-    /([NS])\s*(\d{1,3}(?:\.\d+)?)\s*(?:(\d{1,3}(?:\.\d+)?))?\s*([EW])\s*(\d{1,3}(?:\.\d+)?)\s*(?:(\d{1,3}(?:\.\d+)?))?/i
+  // DM format: N12 53.397 E79 54.775
+  let m = t.match(
+    /^([NS])\s*(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)\s+([EW])\s*(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)$/i
   );
-  if (!m) return null;
+  if (m) {
+    const ns = m[1].toUpperCase();
+    const latDeg = Number(m[2]);
+    const latMin = Number(m[3]);
+    const ew = m[4].toUpperCase();
+    const lonDeg = Number(m[5]);
+    const lonMin = Number(m[6]);
 
-  const ns = m[1].toUpperCase();
-  const latDeg = Number(m[2]);
-  const latMin = m[3] != null ? Number(m[3]) : null;
+    let lat = latDeg + latMin / 60;
+    let lon = lonDeg + lonMin / 60;
 
-  const ew = m[4].toUpperCase();
-  const lonDeg = Number(m[5]);
-  const lonMin = m[6] != null ? Number(m[6]) : null;
+    if (ns === "S") lat = -lat;
+    if (ew === "W") lon = -lon;
 
-  if (!Number.isFinite(latDeg) || !Number.isFinite(lonDeg)) return null;
+    return { lat, lon };
+  }
 
-  let lat = latDeg;
-  let lon = lonDeg;
+  // Decimal format: N12.913786 E79.856013
+  m = t.match(
+    /^([NS])\s*(\d{1,3}(?:\.\d+)?)\s+([EW])\s*(\d{1,3}(?:\.\d+)?)$/i
+  );
+  if (m) {
+    const ns = m[1].toUpperCase();
+    let lat = Number(m[2]);
+    const ew = m[3].toUpperCase();
+    let lon = Number(m[4]);
 
-  if (latMin != null && Number.isFinite(latMin)) lat = latDeg + latMin / 60;
-  if (lonMin != null && Number.isFinite(lonMin)) lon = lonDeg + lonMin / 60;
+    if (ns === "S") lat = -lat;
+    if (ew === "W") lon = -lon;
 
-  if (ns === "S") lat = -Math.abs(lat);
-  if (ew === "W") lon = -Math.abs(lon);
+    return { lat, lon };
+  }
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-  return { lat, lon };
+  return null;
 }
 
 /** =========================
@@ -269,6 +282,54 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+function formatDecimalToDM(value: number, kind: "lat" | "lon") {
+  const abs = Math.abs(value);
+  const deg = Math.floor(abs);
+  const min = (abs - deg) * 60;
+
+  const dir =
+    kind === "lat"
+      ? value >= 0
+        ? "N"
+        : "S"
+      : value >= 0
+        ? "E"
+        : "W";
+
+  return `${dir}${deg} ${min.toFixed(3)}`;
+}
+
+function formatNEFromLatLon(lat: number, lon: number) {
+  return `${formatDecimalToDM(lat, "lat")}
+${formatDecimalToDM(lon, "lon")}`;
+}
+
+function fallbackLocationFromLatLon(lat: number, lon: number) {
+  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+}
+
+function pointSortValue(raw: any, index: number) {
+  const candidates = [
+    raw.point_key,
+    raw.gps_no,
+    raw.gps,
+    raw.no,
+    raw.seq,
+    raw.sequence,
+    raw.point_no,
+    raw.point_index,
+    raw.idx,
+    raw.index,
+  ];
+
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n)) return n;
+  }
+
+  return index + 1;
 }
 
 function toGpxXml(params: { name: string; creator?: string; points: GPXPoint[] }) {
@@ -779,109 +840,122 @@ async function buildObjectiveRouteMapSection(params: {
   children.push(new Paragraph({ spacing: { before: 0, after: 0 }, text: "" }));
 
 if (routeMapBytes) {
-    // ✅ Route Map page layout like screenshot:
-    // Left: 4 location boxes, Right: large map image
-    const locs = (routeLocations || []).slice(0, 4);
-    while (locs.length < 4) locs.push("");
+    // ✅ Show location boxes only when at least one location has value.
+    // Otherwise show only the map centered.
+    const rawLocs = (routeLocations || []).slice(0, 4);
+    const hasAnyLocation = rawLocs.some((x) => String(x || "").trim());
 
-    const leftRows = locs.map((label, idx) => {
-      const iconText = idx === 3 ? "📍" : "○";
-      const iconColor = idx === 3 ? "B42318" : "101828";
+    const mapImgPara = centeredImageFit(routeMapBytes, 1100, 700);
 
-      return new TableRow({
-        cantSplit: true,
-        children: [
-          new TableCell({
-            width: { size: 12, type: WidthType.PERCENTAGE },
-            margins: { top: 90, bottom: 90, left: 120, right: 120 } as any,
-            verticalAlign: VerticalAlign.CENTER,
-            borders: {
-              top: { style: BorderStyle.NONE },
-              bottom: { style: BorderStyle.NONE },
-              left: { style: BorderStyle.NONE },
-              right: { style: BorderStyle.NONE },
-            },
+    if (!hasAnyLocation) {
+      children.push(
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 0, after: 0 },
+          children: [],
+        })
+      );
+      (children as any).push(mapImgPara);
+    } else {
+      const locs = [...rawLocs];
+      while (locs.length < 4) locs.push("");
+
+      const leftRows = locs.map((label, idx) => {
+        const iconText = idx === 3 ? "📍" : "○";
+        const iconColor = idx === 3 ? "B42318" : "101828";
+
+        return new TableRow({
+          cantSplit: true,
+          children: [
+            new TableCell({
+              width: { size: 12, type: WidthType.PERCENTAGE },
+              margins: { top: 90, bottom: 90, left: 120, right: 120 } as any,
+              verticalAlign: VerticalAlign.CENTER,
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE },
+              },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  children: [new TextRun({ text: iconText, size: 36, color: iconColor, bold: true })],
+                }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 88, type: WidthType.PERCENTAGE },
+              margins: { top: 90, bottom: 90, left: 220, right: 220 } as any,
+              verticalAlign: VerticalAlign.CENTER,
+              borders: {
+                top: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+                bottom: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+                left: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+                right: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
+              },
+              children: [
+                new Paragraph({
+                  alignment: AlignmentType.LEFT,
+                  children: [
+                    new TextRun({
+                      text: (label || "").trim() || " ",
+                      size: 32,
+                      color: "101828",
+                      bold: true,
+                    }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        });
+      });
+
+      const leftPanel = new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        layout: TableLayoutType.FIXED,
+        rows: leftRows,
+      });
+
+      const layoutTable = new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        layout: TableLayoutType.FIXED,
+        rows: [
+          new TableRow({
+            cantSplit: true,
             children: [
-              new Paragraph({
-                alignment: AlignmentType.CENTER,
-                children: [new TextRun({ text: iconText, size: 36, color: iconColor, bold: true })],
+              new TableCell({
+                width: { size: 30, type: WidthType.PERCENTAGE },
+                margins: { top: 0, bottom: 0, left: 0, right: 200 } as any,
+                verticalAlign: VerticalAlign.TOP,
+                borders: {
+                  top: { style: BorderStyle.NONE },
+                  bottom: { style: BorderStyle.NONE },
+                  left: { style: BorderStyle.NONE },
+                  right: { style: BorderStyle.NONE },
+                },
+                children: [leftPanel],
               }),
-            ],
-          }),
-          new TableCell({
-            width: { size: 88, type: WidthType.PERCENTAGE },
-            margins: { top: 90, bottom: 90, left: 220, right: 220 } as any,
-            verticalAlign: VerticalAlign.CENTER,
-            borders: {
-              top: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
-              bottom: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
-              left: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
-              right: { style: BorderStyle.SINGLE, size: 6, color: "D0D5DD" },
-            },
-            children: [
-              new Paragraph({
-                alignment: AlignmentType.LEFT,
-                children: [
-                  new TextRun({
-                    text: (label || "").trim() || " ",
-                    size: 32,
-                    color: "101828",
-                    bold: true,
-                  }),
-                ],
+              new TableCell({
+                width: { size: 70, type: WidthType.PERCENTAGE },
+                margins: { top: 0, bottom: 0, left: 200, right: 0 } as any,
+                verticalAlign: VerticalAlign.TOP,
+                borders: {
+                  top: { style: BorderStyle.NONE },
+                  bottom: { style: BorderStyle.NONE },
+                  left: { style: BorderStyle.NONE },
+                  right: { style: BorderStyle.NONE },
+                },
+                children: [mapImgPara],
               }),
             ],
           }),
         ],
       });
-    });
 
-    const leftPanel = new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      layout: TableLayoutType.FIXED,
-      rows: leftRows,
-    });
-
-    const mapImgPara = centeredImageFit(routeMapBytes, 920, 650);
-
-    const layoutTable = new Table({
-      width: { size: 100, type: WidthType.PERCENTAGE },
-      layout: TableLayoutType.FIXED,
-      rows: [
-        new TableRow({
-          cantSplit: true,
-          children: [
-            new TableCell({
-              width: { size: 30, type: WidthType.PERCENTAGE },
-              margins: { top: 0, bottom: 0, left: 0, right: 200 } as any,
-              verticalAlign: VerticalAlign.TOP,
-              borders: {
-                top: { style: BorderStyle.NONE },
-                bottom: { style: BorderStyle.NONE },
-                left: { style: BorderStyle.NONE },
-                right: { style: BorderStyle.NONE },
-              },
-              children: [leftPanel],
-            }),
-            new TableCell({
-              width: { size: 70, type: WidthType.PERCENTAGE },
-              margins: { top: 0, bottom: 0, left: 200, right: 0 } as any,
-              verticalAlign: VerticalAlign.TOP,
-              borders: {
-                top: { style: BorderStyle.NONE },
-                bottom: { style: BorderStyle.NONE },
-                left: { style: BorderStyle.NONE },
-                right: { style: BorderStyle.NONE },
-              },
-              children: [mapImgPara],
-            }),
-          ],
-        }),
-      ],
-    });
-
-    // Table needs to be pushed into section children
-    (children as any).push(layoutTable);
+      (children as any).push(layoutTable);
+    }
   } else {
     children.push(
       new Paragraph({
@@ -2477,22 +2551,46 @@ function normalizePoint(raw: any): NormalizedPoint {
       ""
   );
 
-  const latRaw = raw.loc_lat ?? raw.lat ?? raw.latitude ?? raw.north ?? raw.n;
-  const lonRaw = raw.loc_lon ?? raw.lon ?? raw.lng ?? raw.longitude ?? raw.east ?? raw.e;
+  const rawNe =
+    typeof raw.ne_coordinate === "string" && raw.ne_coordinate.trim()
+      ? raw.ne_coordinate.trim()
+      : typeof raw.coordinate === "string" && raw.coordinate.trim()
+        ? raw.coordinate.trim()
+        : "";
 
-  const lat = latRaw != null ? Number(latRaw) : null;
-  const lon = lonRaw != null ? Number(lonRaw) : null;
-
+  let lat: number | null = null;
+  let lon: number | null = null;
   let ne_coordinate = "";
-  if (lat != null && lon != null && !Number.isNaN(lat) && !Number.isNaN(lon)) {
-    ne_coordinate = `N${s(lat)}\nE${s(lon)}`;
-  } else if (typeof raw.ne_coordinate === "string" && raw.ne_coordinate.trim()) {
-    ne_coordinate = raw.ne_coordinate.trim();
-  } else if (typeof raw.coordinate === "string" && raw.coordinate.trim()) {
-    ne_coordinate = raw.coordinate.trim();
+
+  if (rawNe) {
+    ne_coordinate = rawNe;
+    const parsed = parseNEToDecimal(rawNe);
+    if (parsed) {
+      lat = parsed.lat;
+      lon = parsed.lon;
+    }
+  } else {
+    const latRaw = raw.loc_lat ?? raw.lat ?? raw.latitude ?? raw.north ?? raw.n;
+    const lonRaw = raw.loc_lon ?? raw.lon ?? raw.lng ?? raw.longitude ?? raw.east ?? raw.e;
+
+    const latNum = latRaw != null ? Number(latRaw) : null;
+    const lonNum = lonRaw != null ? Number(lonRaw) : null;
+
+    if (
+      latNum != null &&
+      lonNum != null &&
+      !Number.isNaN(latNum) &&
+      !Number.isNaN(lonNum)
+    ) {
+      lat = latNum;
+      lon = lonNum;
+      ne_coordinate = `N${s(latNum)}\nE${s(lonNum)}`;
+    }
   }
 
-  const details = s(raw.details ?? raw.remarks ?? raw.note ?? raw.__report_category ?? raw.category ?? "");
+  const details = s(
+    raw.details ?? raw.remarks ?? raw.note ?? raw.__report_category ?? raw.category ?? ""
+  );
   const location = s(raw.location ?? raw.place ?? raw.area ?? raw.city ?? raw.village ?? "");
   const photo_refs = Array.from(new Set(collectImageStrings(raw)));
 
@@ -2506,10 +2604,19 @@ function normalizePoint(raw: any): NormalizedPoint {
       ""
   );
 
-  const description = s(raw.description ?? raw.desc ?? raw.__report_description ?? "");
+  let description = s(raw.description ?? raw.desc ?? raw.__report_description ?? "").trim();
+
+  if (description && details && description.toLowerCase() === details.trim().toLowerCase()) {
+    description = "";
+  }
 
   const movement = normalizeMovement(
-    raw.difficulty ?? raw.vehicle_movement ?? raw.movement ?? raw.status ?? raw.__report_difficulty ?? ""
+    raw.difficulty ??
+      raw.vehicle_movement ??
+      raw.movement ??
+      raw.status ??
+      raw.__report_difficulty ??
+      ""
   );
 
   return {
@@ -2522,8 +2629,8 @@ function normalizePoint(raw: any): NormalizedPoint {
     movement,
     photo_refs,
     photo_description,
-    __lat: !Number.isNaN(lat as any) ? lat : null,
-    __lon: !Number.isNaN(lon as any) ? lon : null,
+    __lat: lat,
+    __lon: lon,
   };
 }
 
@@ -2717,7 +2824,11 @@ async function makeBodyRow(supabase: any, p: NormalizedPoint, includePhotos: boo
   let locText = (p.location || "").trim();
   if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
     const place = await reverseGeocodeOSM(lat, lon);
-    if (place) locText = place;
+    if (place) {
+      locText = place;
+    } else if (!locText) {
+      locText = fallbackLocationFromLatLon(lat, lon);
+    }
   }
   if (!locText) locText = "—";
 
@@ -2761,12 +2872,17 @@ function photoPageHeaderCell(text: string, widthPct: number) {
   });
 }
 
-function photoPageValueCell(text: string, widthPct: number, align: AlignmentType = AlignmentType.LEFT) {
+function photoPageValueCell(
+  text: string,
+  widthPct: number,
+  align: AlignmentType = AlignmentType.LEFT,
+  fillColor: string = PHOTO_PAGE_ROW_FILL
+) {
   const lines = splitLines(text);
   return new TableCell({
     width: { size: widthPct, type: WidthType.PERCENTAGE },
     verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_ROW_FILL },
+    shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
     margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
     children: lines.map((ln) =>
@@ -2788,14 +2904,18 @@ function routeDifficultyFill(m: string) {
   return PHOTO_PAGE_ROW_FILL;
 }
 
-function photoPageRouteDifficultyCell(movement: string, widthPct: number) {
+function photoPageRouteDifficultyCell(
+  movement: string,
+  widthPct: number,
+  fillColor?: string
+) {
   const mm = normalizeMovement(movement);
   const label = mm ? mm.toUpperCase() : "—";
 
   return new TableCell({
     width: { size: widthPct, type: WidthType.PERCENTAGE },
     verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: routeDifficultyFill(mm) },
+    shading: { type: ShadingType.CLEAR, fill: fillColor || routeDifficultyFill(mm) },
     borders: CELL_BORDERS,
     margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
     children: [
@@ -2805,6 +2925,87 @@ function photoPageRouteDifficultyCell(movement: string, widthPct: number) {
         children: [new TextRun({ text: label, bold: true, size: 32, color: "0B3D2E" })],
       }),
     ],
+  });
+}
+
+
+async function photoPageCategoryCell(
+  detailsText: string,
+  widthPct: number,
+  fillColor: string
+) {
+  const kind = detectDetailKind(detailsText || "");
+  const iconBytes = kind ? await iconPngBytes(kind, 120) : null;
+  const categoryText = String(detailsText || "").trim() || "—";
+
+  const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+
+  const inner = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    layout: TableLayoutType.FIXED,
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            width: { size: 18, type: WidthType.PERCENTAGE },
+            borders: { top: none, bottom: none, left: none, right: none },
+            verticalAlign: VerticalAlign.TOP,
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 80, after: 0 },
+                children: iconBytes
+                  ? [new ImageRun({ data: iconBytes, transformation: { width: 18, height: 18 } })]
+                  : [new TextRun({ text: "", size: 2 })],
+              }),
+            ],
+          }),
+          new TableCell({
+            width: { size: 82, type: WidthType.PERCENTAGE },
+            borders: { top: none, bottom: none, left: none, right: none },
+            verticalAlign: VerticalAlign.TOP,
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.LEFT,
+                spacing: STYLE.spacing.cell,
+                children: [new TextRun({ text: categoryText, bold: true, size: 32, color: "0B3D2E" })],
+              }),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: fillColor },
+    borders: CELL_BORDERS,
+    margins: { top: 120, bottom: 120, left: 120, right: 120 } as any,
+    children: [inner],
+  });
+}
+
+function photoPageObservationCell(
+  descText: string,
+  widthPct: number,
+  fillColor: string
+) {
+  const lines = splitLines(String(descText || "").trim() || "—");
+  return new TableCell({
+    width: { size: widthPct, type: WidthType.PERCENTAGE },
+    verticalAlign: VerticalAlign.CENTER,
+    shading: { type: ShadingType.CLEAR, fill: fillColor },
+    borders: CELL_BORDERS,
+    margins: { top: 140, bottom: 140, left: 180, right: 180 } as any,
+    children: lines.map((ln) =>
+      new Paragraph({
+        alignment: AlignmentType.LEFT,
+        spacing: STYLE.spacing.cell,
+        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
+      })
+    ),
   });
 }
 
@@ -2912,7 +3113,12 @@ function summaryItemDescription(p: NormalizedPoint) {
   const parts: string[] = [];
   const first = loc ? `${title} - ${loc}` : title;
   parts.push(first);
-  if (desc) parts.push(desc);
+
+  const cleanDesc = cleanExportDescription(title, desc);
+  if (cleanDesc && cleanDesc.toLowerCase() !== loc.toLowerCase()) {
+    parts.push(cleanDesc);
+  }
+
   return parts.join("\n");
 }
 
@@ -3308,13 +3514,18 @@ async function buildPhotoPageSection(
   let locText = (p.location || "").trim();
   if (lat != null && lon != null && Number.isFinite(lat) && Number.isFinite(lon)) {
     const place = await reverseGeocodeOSM(lat, lon);
-    if (place) locText = place;
+    if (place) {
+      locText = place;
+    } else if (!locText) {
+      locText = fallbackLocationFromLatLon(lat, lon);
+    }
   }
   if (!locText) locText = "—";
 
-  const obsCell = await photoPageObsCell(p.details || "—", p.description || "", 30);
-
-  const diffCell = photoPageRouteDifficultyCell(p.movement, 20);
+  const rowFill = routeDifficultyFill(p.movement);
+  const categoryCell = await photoPageCategoryCell(p.details || "—", 15, rowFill);
+  const observationCell = photoPageObservationCell(p.description || "", 19, rowFill);
+  const diffCell = photoPageRouteDifficultyCell(p.movement, 16, rowFill);
 
   const topInfo = new Table({
     layout: TableLayoutType.FIXED,
@@ -3325,17 +3536,19 @@ async function buildPhotoPageSection(
           photoPageHeaderCell("GPS\nLOCATION", 18),
           photoPageHeaderCell("KM", 12),
           photoPageHeaderCell("LOCATION", 20),
-          photoPageHeaderCell("OBSERVATIONS", 30),
-          photoPageHeaderCell("REMARKS / ACTION", 20),
+          photoPageHeaderCell("CATEGORY", 15),
+          photoPageHeaderCell("OBSERVATION", 19),
+          photoPageHeaderCell("REMARKS / ACTION", 16),
         ],
       }),
       new TableRow({
         height: { value: 3200, rule: HeightRule.ATLEAST },
         children: [
-          photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT),
-          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER),
-          photoPageValueCell(locText, 20, AlignmentType.LEFT),
-          obsCell,
+          photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT, rowFill),
+          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER, rowFill),
+          photoPageValueCell(locText, 20, AlignmentType.LEFT, rowFill),
+          categoryCell,
+          observationCell,
           diffCell,
         ],
       }),
@@ -4075,7 +4288,13 @@ async function buildDoc(opts: {
   } catch {
     // ignore conclusion failures (do not block export)
   }
-  // ✅ TABLE PAGES removed (user requested to delete that page)
+  // ✅ TABLE PAGES (restored) — keep the main survey table content in Word
+  sections.push({
+    properties: sectionPropsA3Landscape(),
+    headers: { default: headerDefault },
+    footers: { default: buildFooterTablePages(opts.footerDate ?? new Date()) },
+    children: [table],
+  });
 
   const doc = new Document({ sections });
 
@@ -4169,7 +4388,11 @@ export async function generateProjectDOCX(
 ): Promise<{ blob: Blob; fileName: string }> {
   const includePhotos = opts.includePhotos ?? true;
 
-  const { data: project, error: pErr } = await supabase.from("projects").select("*").eq("id", projectId).single();
+  const { data: project, error: pErr } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
   if (pErr) throw pErr;
 
   const { data: reports, error: rErr } = await supabase
@@ -4179,25 +4402,42 @@ export async function generateProjectDOCX(
     .order("created_at", { ascending: true });
   if (rErr) throw rErr;
 
-  const allPoints: any[] = [];
+  const collected: any[] = [];
 
   for (const r of (reports || []) as ReportRow[]) {
     const { points } = await getPointsForReport(supabase, r.id);
     if (!Array.isArray(points) || !points.length) continue;
 
-    const firstPoint = enrichPointsAlways(points)[0];
+    const reportPoints = points.map((pt: any, idx: number) => ({
+      ...pt,
+      __report_difficulty: r?.difficulty ?? "",
+      __report_category: r?.category ?? "",
+      __report_description: r?.description ?? "",
+      __point_order: pointSortValue(pt, idx),
+      __report_created_at: r?.created_at ?? "",
+      __report_id: r?.id ?? "",
+    }));
 
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, r.id);
-      if (extra.length) {
-        firstPoint.photo_refs = Array.from(
-          new Set([...(firstPoint.photo_refs || []), ...extra])
+      if (extra.length && reportPoints.length) {
+        reportPoints[0].photo_refs = Array.from(
+          new Set([...(reportPoints[0].photo_refs || []), ...extra])
         ).slice(0, 3);
       }
     }
 
-    allPoints.push(firstPoint);
+    collected.push(...reportPoints);
   }
+
+  collected.sort((a, b) => {
+    const ao = Number(a.__point_order ?? 0);
+    const bo = Number(b.__point_order ?? 0);
+    if (Number.isFinite(ao) && Number.isFinite(bo) && ao !== bo) return ao - bo;
+    return String(a.__report_created_at || "").localeCompare(String(b.__report_created_at || ""));
+  });
+
+  const allPoints = enrichPointsAlways(collected);
 
   const name = projectNameOf(project as ProjectRow);
   const fileName = opts.fileName || `${name}-ALL-REPORTS.docx`;
@@ -4226,28 +4466,49 @@ export async function generateProjectDOCXByReportIds(
 ): Promise<{ blob: Blob; fileName: string }> {
   const includePhotos = opts.includePhotos ?? true;
 
-  const { data: project, error: pErr } = await supabase.from("projects").select("*").eq("id", projectId).single();
+  const { data: project, error: pErr } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
   if (pErr) throw pErr;
 
-  const allPoints: any[] = [];
+  const collected: any[] = [];
 
   for (const reportId of reportIds) {
-    const { points } = await getPointsForReport(supabase, reportId);
+    const { points, report } = await getPointsForReport(supabase, reportId);
     if (!Array.isArray(points) || !points.length) continue;
 
-    const firstPoint = enrichPointsAlways(points)[0];
+    const reportPoints = points.map((pt: any, idx: number) => ({
+      ...pt,
+      __report_difficulty: report?.difficulty ?? "",
+      __report_category: report?.category ?? "",
+      __report_description: report?.description ?? "",
+      __point_order: pointSortValue(pt, idx),
+      __report_created_at: report?.created_at ?? "",
+      __report_id: report?.id ?? "",
+    }));
 
     if (includePhotos) {
       const extra = await getExtraPhotosForReport(supabase, reportId);
-      if (extra.length) {
-        firstPoint.photo_refs = Array.from(
-          new Set([...(firstPoint.photo_refs || []), ...extra])
+      if (extra.length && reportPoints.length) {
+        reportPoints[0].photo_refs = Array.from(
+          new Set([...(reportPoints[0].photo_refs || []), ...extra])
         ).slice(0, 3);
       }
     }
 
-    allPoints.push(firstPoint);
+    collected.push(...reportPoints);
   }
+
+  collected.sort((a, b) => {
+    const ao = Number(a.__point_order ?? 0);
+    const bo = Number(b.__point_order ?? 0);
+    if (Number.isFinite(ao) && Number.isFinite(bo) && ao !== bo) return ao - bo;
+    return String(a.__report_created_at || "").localeCompare(String(b.__report_created_at || ""));
+  });
+
+  const allPoints = enrichPointsAlways(collected);
 
   const name = projectNameOf(project as ProjectRow);
   const fileName = opts.fileName || `${name}-REPORTS-${reportIds.length}.docx`;

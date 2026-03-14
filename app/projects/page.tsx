@@ -1,3 +1,4 @@
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -27,12 +28,26 @@ type ParsedPointRow = {
   category: string;
   normalizedCategory?: string | null;
   description?: string | null;
+  difficulty?: string | null;
+  remarks_action?: string | null;
 };
 
 type ParsedImageMapRow = {
   file_name: string;
   point_key: string | null;
   image_key?: string | null;
+};
+
+type ParsedCombinedRow = {
+  point_key: string;
+  latitude: number;
+  longitude: number;
+  category: string;
+  description?: string | null;
+  file_name?: string | null;
+  image_key?: string | null;
+  difficulty?: string | null;
+  remarks_action?: string | null;
 };
 
 type ImportSummary = {
@@ -174,6 +189,37 @@ function stripBom(text: string) {
   return text.replace(/^\uFEFF/, "");
 }
 
+function splitDelimitedLine(line: string, delim: string) {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === delim && !inQuotes) {
+      out.push(cur.trim());
+      cur = "";
+      continue;
+    }
+
+    cur += ch;
+  }
+
+  out.push(cur.trim());
+  return out;
+}
+
 function normalizeCategoryName(input: string) {
   const raw = String(input || "").trim();
   if (!raw) return "Unknown";
@@ -190,20 +236,57 @@ function normalizeCategoryName(input: string) {
   return CATEGORY_ALIAS_MAP[lowered] || raw;
 }
 
+function normalizeDifficulty(input: string) {
+  const raw = String(input || "").trim();
+  if (!raw) return "green";
+
+  const lowered = raw.toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (
+    lowered === "green" ||
+    lowered === "normal" ||
+    lowered === "normal pass" ||
+    lowered === "easy" ||
+    lowered === "clear"
+  ) {
+    return "green";
+  }
+
+  if (
+    lowered === "yellow" ||
+    lowered === "caution" ||
+    lowered === "medium" ||
+    lowered === "restricted" ||
+    lowered === "partial"
+  ) {
+    return "yellow";
+  }
+
+  if (
+    lowered === "red" ||
+    lowered === "blocked" ||
+    lowered === "not possible" ||
+    lowered === "critical" ||
+    lowered === "hard"
+  ) {
+    return "red";
+  }
+
+  return raw;
+}
+
 function parseCSVLike(text: string) {
   const raw = stripBom(text).replace(/\r/g, "").trim();
   if (!raw) return { headers: [] as string[], rows: [] as string[][] };
 
-  const lines = raw
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-
+  const lines = raw.split("\n").filter((l) => l.trim());
   if (!lines.length) return { headers: [] as string[], rows: [] as string[][] };
 
   const delim = detectDelimiter(lines[0]);
-  const headers = lines[0].split(delim).map((h) => normalizeHeader(h));
-  const rows = lines.slice(1).map((ln) => ln.split(delim).map((c) => c.trim()));
+  const headers = splitDelimitedLine(lines[0], delim).map((h) => normalizeHeader(h));
+  const rows = lines
+    .slice(1)
+    .map((ln) => splitDelimitedLine(ln, delim).map((c) => c.trim()));
 
   return { headers, rows };
 }
@@ -221,6 +304,75 @@ function isExcelFile(file: File) {
   return name.endsWith(".xlsx") || name.endsWith(".xls");
 }
 
+function parseNEToDecimalDecimalPart(value: string, kind: "lat" | "lon"): number | null {
+  const raw = String(value || "")
+    .replace(/\r/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!raw) return null;
+
+  const regex =
+    kind === "lat"
+      ? /^([NS])\s*(\d{1,3}(?:\.\d+)?)$/i
+      : /^([EW])\s*(\d{1,3}(?:\.\d+)?)$/i;
+
+  const m = raw.match(regex);
+  if (!m) return null;
+
+  const dir = m[1].toUpperCase();
+  let num = Number(m[2]);
+  if (!Number.isFinite(num)) return null;
+
+  if (dir === "S" || dir === "W") num = -num;
+  return num;
+}
+
+function parseSeparateDMPart(value: string, kind: "lat" | "lon"): number | null {
+  const raw = String(value || "")
+    .replace(/\r/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!raw) return null;
+
+  const regex =
+    kind === "lat"
+      ? /^([NS])\s*(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)$/i
+      : /^([EW])\s*(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)$/i;
+
+  const m = raw.match(regex);
+  if (!m) return null;
+
+  const dir = m[1].toUpperCase();
+  const deg = Number(m[2]);
+  const min = Number(m[3]);
+
+  if (!Number.isFinite(deg) || !Number.isFinite(min)) return null;
+
+  let valueNum = deg + min / 60;
+  if (dir === "S" || dir === "W") valueNum = -valueNum;
+  return valueNum;
+}
+
+function parseSingleCoordinate(value: string, kind: "lat" | "lon"): number | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const plain = Number(raw);
+  if (Number.isFinite(plain)) return plain;
+
+  const dm = parseSeparateDMPart(raw, kind);
+  if (dm != null) return dm;
+
+  const neDecimal = parseNEToDecimalDecimalPart(raw, kind);
+  if (neDecimal != null) return neDecimal;
+
+  return null;
+}
+
 async function readWorkbookRows(file: File): Promise<string[][]> {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array" });
@@ -236,101 +388,6 @@ async function readWorkbookRows(file: File): Promise<string[][]> {
   }) as any[][];
 
   return rows.map((row) => row.map((cell) => String(cell ?? "").trim()));
-}
-
-async function readStructuredFile(file: File) {
-  if (isExcelFile(file)) {
-    const rows = await readWorkbookRows(file);
-    if (!rows.length) return { headers: [] as string[], rows: [] as string[][] };
-
-    const headers = rows[0].map((h) => normalizeHeader(String(h || "")));
-    const dataRows = rows
-      .slice(1)
-      .filter((r) => r.some((c) => String(c || "").trim() !== ""))
-      .map((r) => r.map((c) => String(c || "").trim()));
-
-    return { headers, rows: dataRows };
-  }
-
-  const text = await readTextFile(file);
-  return parseCSVLike(text);
-}
-
-async function parsePoints(file: File): Promise<ParsedPointRow[]> {
-  const { headers, rows } = await readStructuredFile(file);
-  if (!headers.length) return [];
-
-  const iKey = colIndex(headers, ["point_key", "point", "seq", "key"]);
-  const iLat = colIndex(headers, ["latitude", "lat"]);
-  const iLon = colIndex(headers, ["longitude", "lon", "lng"]);
-  const iCat = colIndex(headers, ["category", "report_category"]);
-  const iDesc = colIndex(headers, ["description", "report_description", "desc"]);
-
-  if (iKey < 0 || iLat < 0 || iLon < 0 || iCat < 0) {
-    throw new Error(
-      "Points file must include headers: point_key, latitude, longitude, category"
-    );
-  }
-
-  const out: ParsedPointRow[] = [];
-
-  for (const r of rows) {
-    const key = (r[iKey] ?? "").trim();
-    if (!key) continue;
-
-    const lat = Number((r[iLat] ?? "").trim());
-    const lon = Number((r[iLon] ?? "").trim());
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-
-    const rawCategory = (r[iCat] ?? "").trim();
-    const finalCategory = normalizeCategoryName(rawCategory);
-
-    out.push({
-      point_key: key,
-      latitude: lat,
-      longitude: lon,
-      category: finalCategory || "Unknown",
-      normalizedCategory: finalCategory || null,
-      description: iDesc >= 0 ? ((r[iDesc] ?? "").trim() || null) : null,
-    });
-  }
-
-  return out;
-}
-
-async function parseImageMap(file: File): Promise<ParsedImageMapRow[]> {
-  const { headers, rows } = await readStructuredFile(file);
-  if (!headers.length) return [];
-
-  const iFile = colIndex(headers, ["file_name", "filename", "file", "name"]);
-  const iPoint = colIndex(headers, ["point_key", "point", "seq", "key"]);
-  const iImgKey = colIndex(headers, ["image_key", "imagekey", "img_key", "imgkey"]);
-
-  if (iFile < 0) {
-    throw new Error("Images mapping file must include header: file_name");
-  }
-
-  const out: ParsedImageMapRow[] = [];
-  for (const r of rows) {
-    const file_name = (r[iFile] ?? "").trim();
-    if (!file_name) continue;
-
-    let point_key = iPoint >= 0 ? ((r[iPoint] ?? "").trim() || null) : null;
-    if (point_key) {
-      const up = point_key.toUpperCase();
-      if (up === "NO_GPS" || up === "NOGPS" || up === "NULL" || up === "NONE") {
-        point_key = null;
-      }
-    }
-
-    out.push({
-      file_name,
-      point_key,
-      image_key: iImgKey >= 0 ? ((r[iImgKey] ?? "").trim() || null) : null,
-    });
-  }
-
-  return out;
 }
 
 async function readTextFile(file: File): Promise<string> {
@@ -359,6 +416,84 @@ async function readTextFile(file: File): Promise<string> {
       }
     });
   }
+}
+
+async function readStructuredFile(file: File) {
+  if (isExcelFile(file)) {
+    const rows = await readWorkbookRows(file);
+    if (!rows.length) return { headers: [] as string[], rows: [] as string[][] };
+
+    const headers = rows[0].map((h) => normalizeHeader(String(h || "")));
+    const dataRows = rows
+      .slice(1)
+      .filter((r) => r.some((c) => String(c || "").trim() !== ""))
+      .map((r) => r.map((c) => String(c || "").trim()));
+
+    return { headers, rows: dataRows };
+  }
+
+  const text = await readTextFile(file);
+  return parseCSVLike(text);
+}
+
+async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
+  const { headers, rows } = await readStructuredFile(file);
+  if (!headers.length) return [];
+
+  const iKey = colIndex(headers, ["point_key", "point", "seq", "key"]);
+  const iLat = colIndex(headers, ["latitude", "lat"]);
+  const iLon = colIndex(headers, ["longitude", "lon", "lng"]);
+  const iCat = colIndex(headers, ["category", "report_category"]);
+  const iDesc = colIndex(headers, ["description", "report_description", "desc", "observations"]);
+  const iFile = colIndex(headers, ["file_name", "filename", "file", "name", "image_name"]);
+  const iImgKey = colIndex(headers, ["image_key", "imagekey", "img_key", "imgkey"]);
+  const iAction = colIndex(headers, [
+    "action",
+    "actions",
+    "difficulty",
+    "route_difficulty",
+    "remarks_action",
+    "remarks/action",
+    "remarks_/_action",
+    "vehicle_movement",
+    "movement",
+    "remarks_action_status",
+  ]);
+
+  if (iKey < 0 || iCat < 0 || iLat < 0 || iLon < 0) {
+    throw new Error(
+      "Master file must include separate columns: point_key, latitude, longitude, and category"
+    );
+  }
+
+  const out: ParsedCombinedRow[] = [];
+
+  for (const r of rows) {
+    const point_key = (r[iKey] ?? "").trim();
+    if (!point_key) continue;
+
+    const latRaw = (r[iLat] ?? "").trim();
+    const lonRaw = (r[iLon] ?? "").trim();
+
+    const latitude = parseSingleCoordinate(latRaw, "lat");
+    const longitude = parseSingleCoordinate(lonRaw, "lon");
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+
+    out.push({
+      point_key,
+      latitude: latitude as number,
+      longitude: longitude as number,
+      category: normalizeCategoryName((r[iCat] ?? "").trim()),
+      description: iDesc >= 0 ? ((r[iDesc] ?? "").trim() || null) : null,
+      file_name: iFile >= 0 ? ((r[iFile] ?? "").trim() || null) : null,
+      image_key: iImgKey >= 0 ? ((r[iImgKey] ?? "").trim() || null) : null,
+      difficulty: iAction >= 0 ? normalizeDifficulty((r[iAction] ?? "").trim()) : "green",
+      remarks_action: iAction >= 0 ? ((r[iAction] ?? "").trim() || null) : null,
+    });
+  }
+
+  return out;
 }
 
 async function getImageSize(
@@ -402,9 +537,7 @@ async function mapLimit<T>(
     }
   }
 
-  await Promise.all(
-    Array.from({ length: Math.max(1, limit) }, () => runner())
-  );
+  await Promise.all(Array.from({ length: Math.max(1, limit) }, () => runner()));
 }
 
 function getDuplicates(values: string[]) {
@@ -441,17 +574,14 @@ export default function ProjectsPage() {
   const [bucketName, setBucketName] = useState<string>("reports");
   const [importing, setImporting] = useState(false);
 
-  const [pointsFile, setPointsFile] = useState<File | null>(null);
-  const [imageMapFile, setImageMapFile] = useState<File | null>(null);
+  const [masterFile, setMasterFile] = useState<File | null>(null);
   const [imageFiles, setImageFiles] = useState<File[]>([]);
 
-  const pointsInputRef = useRef<HTMLInputElement | null>(null);
-  const mapInputRef = useRef<HTMLInputElement | null>(null);
+  const masterInputRef = useRef<HTMLInputElement | null>(null);
   const imagesInputRef = useRef<HTMLInputElement | null>(null);
 
   const [summary, setSummary] = useState<ImportSummary | null>(null);
-  const [pointsPreview, setPointsPreview] = useState<string>("");
-  const [imageMapPreview, setImageMapPreview] = useState<string>("");
+  const [masterPreview, setMasterPreview] = useState<string>("");
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -464,6 +594,40 @@ export default function ProjectsPage() {
 
   const redirectToLogin = () => {
     router.replace("/login");
+  };
+
+  const hydrateLastModifiedNames = async (rows: ProjectRow[]) => {
+    try {
+      const userIds = Array.from(
+        new Set(rows.map((r) => r.last_modified_by).filter(Boolean) as string[])
+      );
+
+      if (!userIds.length) {
+        setLastModifiedMap({});
+        return;
+      }
+
+      const { data: profiles, error } = await supabase
+        .from("profiles")
+        .select("id, full_name, name, email")
+        .in("id", userIds);
+
+      if (error) throw error;
+
+      const userIdToName: Record<string, string> = {};
+      (profiles || []).forEach((u: any) => {
+        userIdToName[String(u.id)] =
+          u?.full_name || u?.name || u?.email || String(u.id).slice(0, 8);
+      });
+
+      const map: Record<string, string> = {};
+      rows.forEach((p) => {
+        if (p.last_modified_by) map[p.id] = userIdToName[p.last_modified_by] || "—";
+      });
+      setLastModifiedMap(map);
+    } catch {
+      setLastModifiedMap({});
+    }
   };
 
   const load = async () => {
@@ -546,40 +710,6 @@ export default function ProjectsPage() {
     }
   };
 
-  const hydrateLastModifiedNames = async (rows: ProjectRow[]) => {
-    try {
-      const userIds = Array.from(
-        new Set(rows.map((r) => r.last_modified_by).filter(Boolean) as string[])
-      );
-
-      if (!userIds.length) {
-        setLastModifiedMap({});
-        return;
-      }
-
-      const { data: profiles, error } = await supabase
-        .from("profiles")
-        .select("id, full_name, name, email")
-        .in("id", userIds);
-
-      if (error) throw error;
-
-      const userIdToName: Record<string, string> = {};
-      (profiles || []).forEach((u: any) => {
-        userIdToName[String(u.id)] =
-          u?.full_name || u?.name || u?.email || String(u.id).slice(0, 8);
-      });
-
-      const map: Record<string, string> = {};
-      rows.forEach((p) => {
-        if (p.last_modified_by) map[p.id] = userIdToName[p.last_modified_by] || "—";
-      });
-      setLastModifiedMap(map);
-    } catch {
-      setLastModifiedMap({});
-    }
-  };
-
   const createProject = async () => {
     const name = newName.trim();
     if (!name) return alert("Project name is required");
@@ -630,25 +760,22 @@ export default function ProjectsPage() {
   };
 
   const resetBulk = () => {
-    setPointsFile(null);
-    setImageMapFile(null);
+    setMasterFile(null);
     setImageFiles([]);
     setSummary(null);
-    setPointsPreview("");
-    setImageMapPreview("");
+    setMasterPreview("");
 
-    if (pointsInputRef.current) pointsInputRef.current.value = "";
-    if (mapInputRef.current) mapInputRef.current.value = "";
+    if (masterInputRef.current) masterInputRef.current.value = "";
     if (imagesInputRef.current) imagesInputRef.current.value = "";
   };
 
-  const handlePointsFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMasterFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
-    setPointsFile(file);
+    setMasterFile(file);
     setSummary(null);
 
     if (!file) {
-      setPointsPreview("");
+      setMasterPreview("");
       return;
     }
 
@@ -659,41 +786,13 @@ export default function ProjectsPage() {
           headers.join(", "),
           ...rows.slice(0, 5).map((r) => r.join(", ")),
         ];
-        setPointsPreview(previewLines.join("\n"));
+        setMasterPreview(previewLines.join("\n"));
       } else {
         const text = await readTextFile(file);
-        setPointsPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
+        setMasterPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
       }
     } catch (err: any) {
-      setPointsPreview("");
-      alert(err?.message || String(err));
-    }
-  };
-
-  const handleImageMapFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] ?? null;
-    setImageMapFile(file);
-    setSummary(null);
-
-    if (!file) {
-      setImageMapPreview("");
-      return;
-    }
-
-    try {
-      if (isExcelFile(file)) {
-        const { headers, rows } = await readStructuredFile(file);
-        const previewLines = [
-          headers.join(", "),
-          ...rows.slice(0, 5).map((r) => r.join(", ")),
-        ];
-        setImageMapPreview(previewLines.join("\n"));
-      } else {
-        const text = await readTextFile(file);
-        setImageMapPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
-      }
-    } catch (err: any) {
-      setImageMapPreview("");
+      setMasterPreview("");
       alert(err?.message || String(err));
     }
   };
@@ -704,11 +803,10 @@ export default function ProjectsPage() {
     setSummary(null);
   };
 
-  const runImportOptionA = async () => {
+  const runImportSingleMaster = async () => {
     if (!bulkProjectId) return alert("Select a project.");
     if (!bucketName.trim()) return alert("Bucket name is required.");
-    if (!pointsFile) return alert("Select Points file.");
-    if (!imageMapFile) return alert("Select Images Mapping file.");
+    if (!masterFile) return alert("Select master file.");
     if (!imageFiles.length) return alert("Select image files (bulk).");
 
     setImporting(true);
@@ -728,24 +826,56 @@ export default function ProjectsPage() {
         return;
       }
 
-      const [points, imageMap] = await Promise.all([
-        parsePoints(pointsFile),
-        parseImageMap(imageMapFile),
-      ]);
+      const combinedRows = await parseCombinedFile(masterFile);
 
-      if (!points.length) throw new Error("No valid points found in Points file.");
-      if (!imageMap.length) throw new Error("No valid rows found in Images Mapping file.");
+      if (!combinedRows.length) {
+        throw new Error(
+          "No valid rows found in master file. Check point_key, latitude, longitude, category, and file values."
+        );
+      }
+
+      const pointsMap = new Map<string, ParsedPointRow>();
+      const imageMap: ParsedImageMapRow[] = [];
+
+      combinedRows.forEach((row) => {
+        if (!pointsMap.has(row.point_key)) {
+          pointsMap.set(row.point_key, {
+            point_key: row.point_key,
+            latitude: row.latitude,
+            longitude: row.longitude,
+            category: row.category || "Unknown",
+            normalizedCategory: row.category || "Unknown",
+            description: row.description || null,
+            difficulty: row.difficulty || "green",
+            remarks_action: row.remarks_action || null,
+          });
+        }
+
+        if (row.file_name) {
+          imageMap.push({
+            file_name: row.file_name,
+            point_key: row.point_key,
+            image_key: row.image_key || null,
+          });
+        }
+      });
+
+      const points = Array.from(pointsMap.values());
 
       const duplicateSelectedImages = getDuplicates(imageFiles.map((f) => f.name));
       const duplicateMappingFiles = getDuplicates(imageMap.map((r) => r.file_name));
       const invalidCategories: string[] = [];
 
       if (duplicateSelectedImages.length) {
-        errors.push(`Duplicate selected image names found: ${duplicateSelectedImages.join(", ")}`);
+        errors.push(
+          `Duplicate selected image names found: ${duplicateSelectedImages.join(", ")}`
+        );
       }
 
       if (duplicateMappingFiles.length) {
-        errors.push(`Duplicate file_name values found in mapping file: ${duplicateMappingFiles.join(", ")}`);
+        errors.push(
+          `Duplicate file_name values found in master file: ${duplicateMappingFiles.join(", ")}`
+        );
       }
 
       const pointByKey = new Map<string, ParsedPointRow>();
@@ -753,6 +883,8 @@ export default function ProjectsPage() {
         pointByKey.set(p.point_key, {
           ...p,
           category: normalizeCategoryName(p.category),
+          difficulty: normalizeDifficulty(p.difficulty || "green"),
+          remarks_action: p.remarks_action || null,
         });
       });
 
@@ -771,7 +903,7 @@ export default function ProjectsPage() {
 
       if (missingPointKeysInPointsCsv.length) {
         throw new Error(
-          `These point_key values are used in mapping file but missing in points file: ${missingPointKeysInPointsCsv.join(
+          `These point_key values are used in master file image mapping but missing in points data: ${missingPointKeysInPointsCsv.join(
             ", "
           )}`
         );
@@ -783,6 +915,7 @@ export default function ProjectsPage() {
         if (noGpsReportId) return noGpsReportId;
 
         const noGpsCategory = "NO_GPS Images";
+        const nowIso = new Date().toISOString();
 
         const { data: existing, error: exErr } = await supabase
           .from("reports")
@@ -808,6 +941,10 @@ export default function ProjectsPage() {
               description: "Images that do not have GPS point mapping (bulk import).",
               route_id: null,
               difficulty: "green",
+              loc_lat: null,
+              loc_lon: null,
+              loc_acc: null,
+              loc_time: nowIso,
             },
           ])
           .select("id")
@@ -832,7 +969,9 @@ export default function ProjectsPage() {
       for (const key of sortedKeys) {
         const p = pointByKey.get(key)!;
         const category = p.category.trim() || "Unknown";
-        const description = p.description && p.description.trim() ? p.description.trim() : null;
+        const description = p.description?.trim() || null;
+        const difficulty = normalizeDifficulty(p.difficulty || "green");
+        const nowIso = new Date().toISOString();
 
         const { data: found, error: fErr } = await supabase
           .from("reports")
@@ -856,7 +995,12 @@ export default function ProjectsPage() {
                 category,
                 description,
                 route_id: null,
-                difficulty: "green",
+                difficulty,
+                remarks_action: p.remarks_action?.trim() || null,
+                loc_lat: p.latitude,
+                loc_lon: p.longitude,
+                loc_acc: null,
+                loc_time: nowIso,
               },
             ])
             .select("id")
@@ -867,6 +1011,20 @@ export default function ProjectsPage() {
         }
 
         if (!reportId) throw new Error(`Failed to create/find report for point_key=${key}`);
+
+        const { error: rptUpdErr } = await supabase
+          .from("reports")
+          .update({
+            difficulty,
+            remarks_action: p.remarks_action?.trim() || null,
+            loc_lat: p.latitude,
+            loc_lon: p.longitude,
+            loc_acc: null,
+            loc_time: nowIso,
+          })
+          .eq("id", reportId);
+
+        if (rptUpdErr) throw rptUpdErr;
 
         reportIdByPointKey.set(key, reportId);
 
@@ -887,7 +1045,7 @@ export default function ProjectsPage() {
               longitude: p.longitude,
               elevation: null,
               accuracy: null,
-              timestamp: null,
+              timestamp: nowIso,
             },
           ]);
 
@@ -920,7 +1078,9 @@ export default function ProjectsPage() {
 
       await mapLimit(imageFiles, 3, async (file) => {
         const mapping = mapByFileName.get(file.name);
-        const point_key = mapping?.point_key ?? null;
+        if (!mapping) return;
+
+        const point_key = mapping.point_key ?? null;
 
         let reportId = point_key ? reportIdByPointKey.get(point_key) : null;
         if (!reportId) {
@@ -942,7 +1102,6 @@ export default function ProjectsPage() {
         imagesUploaded++;
 
         const url = uploaded.publicUrl;
-
         if (!url) {
           errors.push(`${file.name}: could not generate public URL`);
           return;
@@ -1024,7 +1183,7 @@ export default function ProjectsPage() {
           </button>
 
           <button style={styles.btnGhost} onClick={() => setBulkOpen(true)}>
-            Bulk Import (GPS + Images)
+            Bulk Import (Single Master File)
           </button>
 
           <div style={styles.exportGroup}>
@@ -1159,24 +1318,43 @@ export default function ProjectsPage() {
               }}
             >
               <div style={{ fontSize: 18, fontWeight: 800 }}>
-                Bulk Import (GPS + Images)
+                Bulk Import (Single Master File + Images)
               </div>
               <button style={styles.btnGhost} onClick={resetBulk} disabled={importing}>
                 Clear
               </button>
             </div>
 
-            <div style={{ marginTop: 10, fontSize: 13, color: "#475467", lineHeight: 1.55 }}>
-              <b>Points File:</b> point_key, latitude, longitude, category (optional:
-              description)
+            <div style={{ marginTop: 10, fontSize: 13, color: "#475467", lineHeight: 1.6 }}>
+              <b>Single master file format:</b>
               <br />
-              <b>Images File:</b> file_name, point_key (optional: image_key 6.1, 6.2...)
+              Required columns:
               <br />
-              Supports <b>CSV, TXT, XLSX, XLS</b>.
+              <b>point_key</b>, <b>latitude</b>, <b>longitude</b>, <b>category</b>
               <br />
-              Any category is allowed. Known categories are normalized automatically.
+              Optional columns:
               <br />
-              Files not mapped / NO_GPS → stored under <b>NO_GPS Images</b> report automatically.
+              <b>description</b>, <b>file_name</b>, <b>image_key</b>, <b>action</b> / <b>actions</b> / <b>difficulty</b>
+              <br />
+              Supports <b>CSV, TXT, XLSX, XLS</b>
+              <br />
+              <br />
+              <b>Accepted latitude / longitude examples:</b>
+              <br />
+              <b>19.17189</b> and <b>72.54298</b>
+              <br />
+              <b>N19.17189</b> and <b>E72.54298</b>
+              <br />
+              <b>N19 10.313</b> and <b>E72 32.578</b>
+              <br />
+              <br />
+              Combined coordinate columns like <b>coordinates</b> or <b>ne_coordinate</b> are <b>not used</b> in this version.
+              <br />
+              Actions/difficulty will be stored into <b>reports.difficulty</b>.
+              <br />
+              The same action value will also be stored into <b>reports.remarks_action</b>.
+              <br />
+              Latitude and longitude will be stored into both <b>reports.loc_lat/loc_lon</b> and <b>report_path_points.latitude/longitude</b>.
             </div>
 
             <div
@@ -1213,10 +1391,9 @@ export default function ProjectsPage() {
             </div>
 
             <div style={{ marginTop: 10 }}>
-              <div style={styles.formLabel}>Category Handling</div>
+              <div style={styles.formLabel}>Category / Difficulty Handling</div>
               <div style={styles.categoryHelpBox}>
-                Known categories are normalized automatically. New or custom categories are
-                also allowed and will be imported as entered.
+                Known categories are normalized automatically. New/custom categories are allowed. The <b>action / actions / difficulty</b> column is saved into both the <b>difficulty</b> field and the <b>remarks_action</b> field in <b>reports</b>.
               </div>
             </div>
 
@@ -1229,49 +1406,33 @@ export default function ProjectsPage() {
               }}
             >
               <div>
-                <div style={styles.formLabel}>Points file</div>
+                <div style={styles.formLabel}>Master file</div>
                 <input
-                  ref={pointsInputRef}
+                  ref={masterInputRef}
                   type="file"
                   accept=".csv,.txt,.xlsx,.xls"
-                  onChange={handlePointsFileChange}
+                  onChange={handleMasterFileChange}
                 />
-                {pointsFile && (
+                {masterFile && (
                   <div style={styles.fileMeta}>
-                    {pointsFile.name} • {pointsFile.size} bytes
+                    {masterFile.name} • {masterFile.size} bytes
                   </div>
                 )}
-                {pointsPreview && <pre style={styles.previewBox}>{pointsPreview}</pre>}
+                {masterPreview && <pre style={styles.previewBox}>{masterPreview}</pre>}
               </div>
 
               <div>
-                <div style={styles.formLabel}>Images Mapping file</div>
+                <div style={styles.formLabel}>Select Images (bulk)</div>
                 <input
-                  ref={mapInputRef}
+                  ref={imagesInputRef}
                   type="file"
-                  accept=".csv,.txt,.xlsx,.xls"
-                  onChange={handleImageMapFileChange}
+                  multiple
+                  accept="image/*"
+                  onChange={handleImagesChange}
                 />
-                {imageMapFile && (
-                  <div style={styles.fileMeta}>
-                    {imageMapFile.name} • {imageMapFile.size} bytes
-                  </div>
-                )}
-                {imageMapPreview && <pre style={styles.previewBox}>{imageMapPreview}</pre>}
-              </div>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <div style={styles.formLabel}>Select Images (bulk)</div>
-              <input
-                ref={imagesInputRef}
-                type="file"
-                multiple
-                accept="image/*"
-                onChange={handleImagesChange}
-              />
-              <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
-                Selected: <b>{imageFiles.length}</b> images
+                <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
+                  Selected: <b>{imageFiles.length}</b> images
+                </div>
               </div>
             </div>
 
@@ -1304,7 +1465,7 @@ export default function ProjectsPage() {
 
                 {summary.duplicateMappingFiles.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>Duplicate mapping file_name values:</b>
+                    <b>Duplicate file_name values in master file:</b>
                     <div style={styles.scrollBox}>
                       {summary.duplicateMappingFiles.map((f) => (
                         <div key={f}>{f}</div>
@@ -1315,7 +1476,7 @@ export default function ProjectsPage() {
 
                 {summary.missingPointKeysInPointsCsv.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>point_key in mapping file but missing in points file:</b>
+                    <b>point_key used in master file images but missing in points:</b>
                     <div style={styles.scrollBox}>
                       {summary.missingPointKeysInPointsCsv.map((f) => (
                         <div key={f}>{f}</div>
@@ -1337,7 +1498,7 @@ export default function ProjectsPage() {
 
                 {summary.missingFilesInUpload.length > 0 && (
                   <div style={{ marginTop: 10, color: "#B42318", fontSize: 13 }}>
-                    <b>In mapping file but not selected:</b>
+                    <b>In master file but not selected:</b>
                     <div style={styles.scrollBox}>
                       {summary.missingFilesInUpload.map((f) => (
                         <div key={f}>{f}</div>
@@ -1348,7 +1509,7 @@ export default function ProjectsPage() {
 
                 {summary.extraFilesNotInMap.length > 0 && (
                   <div style={{ marginTop: 10, color: "#475467", fontSize: 13 }}>
-                    <b>Selected images not in mapping (treated as NO_GPS):</b>
+                    <b>Selected images not present in master file (skipped):</b>
                     <div style={styles.scrollBox}>
                       {summary.extraFilesNotInMap.map((f) => (
                         <div key={f}>{f}</div>
@@ -1380,7 +1541,7 @@ export default function ProjectsPage() {
               </button>
               <button
                 style={{ ...styles.btnPrimary, opacity: importing ? 0.7 : 1 }}
-                onClick={runImportOptionA}
+                onClick={runImportSingleMaster}
                 disabled={importing}
               >
                 {importing ? "Importing..." : "Run Import"}
