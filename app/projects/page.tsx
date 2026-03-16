@@ -1,4 +1,3 @@
-
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -237,42 +236,7 @@ function normalizeCategoryName(input: string) {
 }
 
 function normalizeDifficulty(input: string) {
-  const raw = String(input || "").trim();
-  if (!raw) return "green";
-
-  const lowered = raw.toLowerCase().replace(/\s+/g, " ").trim();
-
-  if (
-    lowered === "green" ||
-    lowered === "normal" ||
-    lowered === "normal pass" ||
-    lowered === "easy" ||
-    lowered === "clear"
-  ) {
-    return "green";
-  }
-
-  if (
-    lowered === "yellow" ||
-    lowered === "caution" ||
-    lowered === "medium" ||
-    lowered === "restricted" ||
-    lowered === "partial"
-  ) {
-    return "yellow";
-  }
-
-  if (
-    lowered === "red" ||
-    lowered === "blocked" ||
-    lowered === "not possible" ||
-    lowered === "critical" ||
-    lowered === "hard"
-  ) {
-    return "red";
-  }
-
-  return raw;
+  return String(input || "").trim() || "green";
 }
 
 function parseCSVLike(text: string) {
@@ -480,6 +444,8 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
 
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
 
+    const rawAction = iAction >= 0 ? (r[iAction] ?? "").trim() : "";
+
     out.push({
       point_key,
       latitude: latitude as number,
@@ -488,8 +454,8 @@ async function parseCombinedFile(file: File): Promise<ParsedCombinedRow[]> {
       description: iDesc >= 0 ? ((r[iDesc] ?? "").trim() || null) : null,
       file_name: iFile >= 0 ? ((r[iFile] ?? "").trim() || null) : null,
       image_key: iImgKey >= 0 ? ((r[iImgKey] ?? "").trim() || null) : null,
-      difficulty: iAction >= 0 ? normalizeDifficulty((r[iAction] ?? "").trim()) : "green",
-      remarks_action: iAction >= 0 ? ((r[iAction] ?? "").trim() || null) : null,
+      difficulty: normalizeDifficulty(rawAction),
+      remarks_action: rawAction || null,
     });
   }
 
@@ -940,7 +906,7 @@ export default function ProjectsPage() {
               category: noGpsCategory,
               description: "Images that do not have GPS point mapping (bulk import).",
               route_id: null,
-              difficulty: "green",
+              difficulty: "NO_GPS",
               loc_lat: null,
               loc_lon: null,
               loc_acc: null,
@@ -1350,7 +1316,7 @@ export default function ProjectsPage() {
               <br />
               Combined coordinate columns like <b>coordinates</b> or <b>ne_coordinate</b> are <b>not used</b> in this version.
               <br />
-              Actions/difficulty will be stored into <b>reports.difficulty</b>.
+              Actions/difficulty will be stored into <b>reports.difficulty</b> exactly as provided.
               <br />
               The same action value will also be stored into <b>reports.remarks_action</b>.
               <br />
@@ -1393,7 +1359,7 @@ export default function ProjectsPage() {
             <div style={{ marginTop: 10 }}>
               <div style={styles.formLabel}>Category / Difficulty Handling</div>
               <div style={styles.categoryHelpBox}>
-                Known categories are normalized automatically. New/custom categories are allowed. The <b>action / actions / difficulty</b> column is saved into both the <b>difficulty</b> field and the <b>remarks_action</b> field in <b>reports</b>.
+                Known categories are normalized automatically. New/custom categories are allowed. The <b>action / actions / difficulty</b> column is saved exactly as provided into both the <b>difficulty</b> field and the <b>remarks_action</b> field in <b>reports</b>.
               </div>
             </div>
 
