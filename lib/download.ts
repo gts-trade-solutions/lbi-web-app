@@ -1166,6 +1166,7 @@ type NormalizedPoint = {
 
   description: string;
   movement: VehicleMovement;
+  remarks_action: string;
 
   photo_refs: string[];
   photo_description: string;
@@ -2584,7 +2585,7 @@ function normalizePoint(raw: any): NormalizedPoint {
     ) {
       lat = latNum;
       lon = lonNum;
-      ne_coordinate = `N${s(latNum)}\nE${s(lonNum)}`;
+      ne_coordinate = formatNEFromLatLon(latNum, lonNum);
     }
   }
 
@@ -2619,6 +2620,15 @@ function normalizePoint(raw: any): NormalizedPoint {
       ""
   );
 
+  const remarks_action = s(
+    raw.remarks_action ??
+      raw.action ??
+      raw.actions ??
+      raw.__report_remarks_action ??
+      raw.__report_difficulty ??
+      ""
+  ).trim();
+
   return {
     gps_no: gpsCandidate,
     kms: kmsCandidate,
@@ -2627,6 +2637,7 @@ function normalizePoint(raw: any): NormalizedPoint {
     location,
     description: description || "—",
     movement,
+    remarks_action,
     photo_refs,
     photo_description,
     __lat: lat,
@@ -2776,6 +2787,7 @@ async function getPointsForReport(supabase: any, reportId: string) {
             __report_difficulty: reportDifficulty,
             __report_category: report?.category ?? "",
             __report_description: report?.description ?? "",
+      __report_remarks_action: report?.remarks_action ?? "",
           }));
           return { points: patched, report, routeId };
         }
@@ -3525,7 +3537,11 @@ async function buildPhotoPageSection(
   const rowFill = routeDifficultyFill(p.movement);
   const categoryCell = await photoPageCategoryCell(p.details || "—", 15, rowFill);
   const observationCell = photoPageObservationCell(p.description || "", 19, rowFill);
-  const diffCell = photoPageRouteDifficultyCell(p.movement, 16, rowFill);
+  const remarksCell = photoPageObservationCell(
+    p.remarks_action || p.movement || "—",
+    16,
+    rowFill
+  );
 
   const topInfo = new Table({
     layout: TableLayoutType.FIXED,
@@ -3549,7 +3565,7 @@ async function buildPhotoPageSection(
           photoPageValueCell(locText, 20, AlignmentType.LEFT, rowFill),
           categoryCell,
           observationCell,
-          diffCell,
+          remarksCell,
         ],
       }),
     ],
@@ -4288,13 +4304,7 @@ async function buildDoc(opts: {
   } catch {
     // ignore conclusion failures (do not block export)
   }
-  // ✅ TABLE PAGES (restored) — keep the main survey table content in Word
-  sections.push({
-    properties: sectionPropsA3Landscape(),
-    headers: { default: headerDefault },
-    footers: { default: buildFooterTablePages(opts.footerDate ?? new Date()) },
-    children: [table],
-  });
+
 
   const doc = new Document({ sections });
 
@@ -4413,6 +4423,7 @@ export async function generateProjectDOCX(
       __report_difficulty: r?.difficulty ?? "",
       __report_category: r?.category ?? "",
       __report_description: r?.description ?? "",
+      __report_remarks_action: r?.remarks_action ?? "",
       __point_order: pointSortValue(pt, idx),
       __report_created_at: r?.created_at ?? "",
       __report_id: r?.id ?? "",
