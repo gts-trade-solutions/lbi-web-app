@@ -548,6 +548,9 @@ export default function ProjectsPage() {
 
   const [summary, setSummary] = useState<ImportSummary | null>(null);
   const [masterPreview, setMasterPreview] = useState<string>("");
+  const [previewRows, setPreviewRows] = useState<Record<string, any>[]>([]);
+  const [previewFileName, setPreviewFileName] = useState<string>("master_preview.xlsx");
+  const [previewReady, setPreviewReady] = useState(false);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -730,18 +733,140 @@ export default function ProjectsPage() {
     setImageFiles([]);
     setSummary(null);
     setMasterPreview("");
+    setPreviewRows([]);
+    setPreviewFileName("master_preview.xlsx");
+    setPreviewReady(false);
 
     if (masterInputRef.current) masterInputRef.current.value = "";
     if (imagesInputRef.current) imagesInputRef.current.value = "";
+  };
+
+  const haversineKm = (
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number
+  ) => {
+    const toRad = (v: number) => (v * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) *
+        Math.cos(toRad(lat2)) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  };
+
+  const getLocationName = async (lat: number, lng: number): Promise<string> => {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+          lat
+        )}&lon=${encodeURIComponent(lng)}`,
+        {
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!res.ok) return `${lat}, ${lng}`;
+
+      const data = await res.json();
+      const addr = data?.address || {};
+
+      const road =
+        addr.road || addr.pedestrian || addr.suburb || addr.neighbourhood || "";
+      const area =
+        addr.suburb ||
+        addr.neighbourhood ||
+        addr.city_district ||
+        addr.village ||
+        addr.town ||
+        addr.city ||
+        "";
+      const city = addr.city || addr.town || addr.village || addr.county || "";
+
+      const parts = [road, area, city].filter(
+        (value, index, arr) => value && arr.indexOf(value) === index
+      );
+
+      return parts.length ? parts.join(", ") : data?.display_name || `${lat}, ${lng}`;
+    } catch {
+      return `${lat}, ${lng}`;
+    }
+  };
+
+  const buildPreviewRows = async (rows: ParsedCombinedRow[]) => {
+    const sorted = [...rows].sort((a, b) => {
+      const na = Number(a.point_key);
+      const nb = Number(b.point_key);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return String(a.point_key).localeCompare(String(b.point_key));
+    });
+
+    let cumulativeKm = 0;
+    const previewRowsResult: Array<Record<string, any>> = [];
+
+    for (let index = 0; index < sorted.length; index += 1) {
+      const row = sorted[index];
+
+      if (index > 0) {
+        const prev = sorted[index - 1];
+        cumulativeKm += haversineKm(
+          prev.latitude,
+          prev.longitude,
+          row.latitude,
+          row.longitude
+        );
+      }
+
+      const location = await getLocationName(row.latitude, row.longitude);
+
+      previewRowsResult.push({
+        sl_no: index + 1,
+        point_key: row.point_key,
+        latitude: row.latitude,
+        longitude: row.longitude,
+        location,
+        kms: cumulativeKm.toFixed(4),
+        category: row.category || "",
+        description: row.description || "",
+        file_name: row.file_name || "",
+        image_key: row.image_key || "",
+        difficulty: row.difficulty || "",
+        remarks_action: row.remarks_action || "",
+      });
+    }
+
+    return previewRowsResult;
+  };
+
+  const downloadPreviewExcel = () => {
+    if (!previewRows.length) {
+      alert("No preview data available.");
+      return;
+    }
+
+    const worksheet = XLSX.utils.json_to_sheet(previewRows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Preview");
+    XLSX.writeFile(workbook, previewFileName || "master_preview.xlsx");
   };
 
   const handleMasterFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     setMasterFile(file);
     setSummary(null);
+    setPreviewRows([]);
+    setPreviewReady(false);
 
     if (!file) {
       setMasterPreview("");
+      setPreviewFileName("master_preview.xlsx");
       return;
     }
 
@@ -757,8 +882,25 @@ export default function ProjectsPage() {
         const text = await readTextFile(file);
         setMasterPreview(text.split(/\r?\n/).slice(0, 6).join("\n"));
       }
+
+      const combinedRows = await parseCombinedFile(file);
+      const rowsForPreview = await buildPreviewRows(combinedRows);
+
+      if (!rowsForPreview.length) {
+        throw new Error(
+          "No valid rows found to build preview. Check point_key, latitude, longitude, and category columns."
+        );
+      }
+
+      setPreviewRows(rowsForPreview);
+      setPreviewReady(true);
+      setPreviewFileName(
+        `${file.name.replace(/\.[^.]+$/, "") || "master"}_preview.xlsx`
+      );
     } catch (err: any) {
       setMasterPreview("");
+      setPreviewRows([]);
+      setPreviewReady(false);
       alert(err?.message || String(err));
     }
   };
@@ -1385,6 +1527,20 @@ export default function ProjectsPage() {
                   </div>
                 )}
                 {masterPreview && <pre style={styles.previewBox}>{masterPreview}</pre>}
+                {previewReady && (
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      type="button"
+                      style={styles.btnPrimary}
+                      onClick={downloadPreviewExcel}
+                    >
+                      Download Preview Excel
+                    </button>
+                    <div style={{ fontSize: 12, color: "#667085", marginTop: 6 }}>
+                      Download this file, correct location / kms if needed, then upload the corrected Excel again.
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>

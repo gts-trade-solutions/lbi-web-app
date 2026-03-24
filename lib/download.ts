@@ -68,8 +68,8 @@ const STYLE = {
   cellMargins: { top: 80, bottom: 80, left: 120, right: 120 } as any,
   row: { height: 3800 },
   photo: {
-    single: { w: 320, h: 180 },
-    multi: { w: 230, h: 130 },
+    single: { w: 210, h: 120 },
+    multi: { w: 145, h: 90 },
   },
 };
 
@@ -406,6 +406,29 @@ const GRID_COLS = [1637, 1934, 2827, 1562, 1562, 1934, 1934, 1785, 1338, 2379, 2
 const HEADER_FILL = "365F91";
 const PHOTO_PAGE_HEADER_FILL = "4CAF50";
 const PHOTO_PAGE_ROW_FILL = "D9EAD3";
+
+const PHOTO_THEME = {
+  green: {
+    header: "4CAF50",
+    body: "D9EAD3",
+    text: "0B3D2E",
+  },
+  yellow: {
+    header: "FFFF00",
+    body: "FEFECA",
+    text: "7A5D00",
+  },
+  red: {
+    header: "FF0000",
+    body: "E57373",
+    text: "7A1C1C",
+  },
+  default: {
+    header: "4CAF50",
+    body: "D9EAD3",
+    text: "0B3D2E",
+  },
+};
 
 const PAGE_BORDER_COLOR = "C00000";
 
@@ -868,7 +891,7 @@ if (routeMapBytes) {
           cantSplit: true,
           children: [
             new TableCell({
-              width: { size: 12, type: WidthType.PERCENTAGE },
+              width: { size: 20, type: WidthType.PERCENTAGE },
               margins: { top: 90, bottom: 90, left: 120, right: 120 } as any,
               verticalAlign: VerticalAlign.CENTER,
               borders: {
@@ -885,7 +908,7 @@ if (routeMapBytes) {
               ],
             }),
             new TableCell({
-              width: { size: 88, type: WidthType.PERCENTAGE },
+              width: { size: 80, type: WidthType.PERCENTAGE },
               margins: { top: 90, bottom: 90, left: 220, right: 220 } as any,
               verticalAlign: VerticalAlign.CENTER,
               borders: {
@@ -1262,6 +1285,78 @@ function splitLines(text: string) {
  * ✅ DETAILS ICONS
  * ========================= */
 const DETAILS_ICON_CACHE = new Map<string, Uint8Array>();
+const DOCX_ICON_CACHE = new Map<string, Uint8Array | null>();
+
+const CATEGORY_ICON_MAP: Record<string, string> = {
+  footpath_bridge: "/images/report-icons/image",
+  lt_cable: "/images/report-icons/ca-3",
+  ht_cable: "/images/report-icons/ca-3",
+  towerline_cable: "/images/report-icons/ca-4",
+  diversion: "/images/report-icons/diversion",
+  towerline: "/images/report-icons/ca-4",
+  underpass: "/images/report-icons/ca-5",
+  tree: "/images/report-icons/ca-6",
+  bridge: "/images/report-icons/ca-5",
+  petrol: "/images/report-icons/ca-15",
+  signboard: "/images/report-icons/ca-17",
+  electric_sign: "/images/report-icons/ca-17",
+  camera_pole: "/images/report-icons/ca-17",
+  toll: "/images/report-icons/ca-9",
+  junction_left: "/images/report-icons/ca-15",
+  bend: "/images/report-icons/ca-13",
+  junction_right: "/images/report-icons/ca-16",
+  river_bridge: "/images/report-icons/ca-7",
+  railway_level_crossing: "/images/report-icons/ca-16",
+  gate: "/images/report-icons/ca-11",
+};
+
+function buildIconCandidateUrls(src: string): string[] {
+  const raw = String(src || "").trim();
+  if (!raw) return [];
+
+  const base =
+    typeof window !== "undefined" && raw.startsWith("/")
+      ? `${window.location.origin}${raw}`
+      : raw;
+
+  if (/\.(png|jpg|jpeg)$/i.test(base)) return [base];
+
+  return [
+    `${base}.png`,
+    `${base}.jpg`,
+    `${base}.jpeg`,
+    base,
+  ];
+}
+
+async function getDocxCategoryIcon(kind: string): Promise<Uint8Array | null> {
+  if (!kind) return null;
+  if (DOCX_ICON_CACHE.has(kind)) return DOCX_ICON_CACHE.get(kind)!;
+
+  const src = CATEGORY_ICON_MAP[kind];
+
+  try {
+    if (src) {
+      const candidates = buildIconCandidateUrls(src);
+      for (const url of candidates) {
+        const bytes = await bytesFromUrlForDocx(url);
+        if (bytes) {
+          DOCX_ICON_CACHE.set(kind, bytes);
+          return bytes;
+        }
+      }
+    }
+
+    // Fallback so export still shows an icon even when the external drawing file is missing.
+    const fallback = await iconPngBytes(kind, 48);
+    DOCX_ICON_CACHE.set(kind, fallback || null);
+    return fallback || null;
+  } catch {
+    const fallback = await iconPngBytes(kind, 48);
+    DOCX_ICON_CACHE.set(kind, fallback || null);
+    return fallback || null;
+  }
+}
 
 function normKey(x: string) {
   return String(x || "")
@@ -1271,30 +1366,32 @@ function normKey(x: string) {
 }
 
 function detectDetailKind(details: string) {
-  const t = normKey(details);
+  const t = normKey(details)
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  if (t.includes("footpath bridge")) return "footpath_bridge";
-  if (t === "bridge" || t.includes(" bridge")) return "bridge";
+  if (t.includes("footpath bridge") || t.includes("foot bridge") || t.includes("pedestrian bridge")) return "footpath_bridge";
   if (t.includes("underpass bridge") || t.includes("underpass")) return "underpass";
 
-  if (t.includes("low tension")) return "lt_cable";
-  if (t.includes("high tension")) return "ht_cable";
-  if (t.includes("towerline cable")) return "towerline_cable";
-  if (t === "towerline" || t.includes("towerline")) return "towerline";
+  if (t.includes("low tension") || t.includes("lt cable") || t.includes("lt line")) return "lt_cable";
+  if (t.includes("high tension") || t.includes("ht cable") || t.includes("ht line")) return "ht_cable";
+  if (t.includes("towerline cable") || t.includes("tower line cable")) return "towerline_cable";
+  if (t === "towerline" || t.includes("towerline") || t.includes("tower line")) return "towerline";
 
-  if (t.includes("junction left")) return "junction_left";
-  if (t.includes("junction right")) return "junction_right";
-  if (t.includes("turn left")) return "junction_left";
-  if (t.includes("turn right")) return "junction_right";
-  if (t === "bend" || t.includes("bend")) return "bend";
-  if (t.includes("take diversion") || t.includes("diversion")) return "diversion";
+  if (t.includes("junction left") || t.includes("left junction") || t.includes("turn left")) return "junction_left";
+  if (t.includes("junction right") || t.includes("right junction") || t.includes("turn right")) return "junction_right";
+  if (t === "bend" || t.includes("bend") || t.includes("curve")) return "bend";
+  if (t.includes("take diversion") || t == "diversion" || t.includes("diversion")) return "diversion";
 
-  if (t.includes("tree branches") || t.includes("tree")) return "tree";
-  if (t.includes("petrol bunk")) return "petrol";
-  if (t.includes("electric sign board")) return "electric_sign";
-  if (t.includes("signboard") || t.includes("sign board")) return "signboard";
-  if (t.includes("camera pole") || t.includes("camera")) return "camera_pole";
-  if (t.includes("toll plaza") || t.includes("toll")) return "toll";
+  if (t.includes("tree branches") || t.includes("tree branch") || t == "tree" || t.includes("branches")) return "tree";
+  if (t.includes("petrol bunk") || t.includes("petrol pump") || t.includes("fuel station") || t.includes("fuel bunk")) return "petrol";
+  if (t.includes("electric sign board") || t.includes("electric signboard") || t.includes("illuminated sign")) return "electric_sign";
+  if (t.includes("signboard") || t.includes("sign board") || t.includes("road sign")) return "signboard";
+  if (t.includes("camera pole") || t.includes("camera") || t.includes("cctv pole") || t.includes("surveillance pole")) return "camera_pole";
+  if (t.includes("toll plaza") || t == "toll" || t.includes("toll")) return "toll";
+
+  if (t === "bridge" || t.includes(" bridge")) return "bridge";
 
   return "";
 }
@@ -2066,14 +2163,14 @@ async function detailsCellWithIcon(detailsText: string, span: number, vAlign: Ve
   const firstLine = lines[0] ?? "—";
   const rest = lines.slice(1);
 
-  const iconBytes = kind ? await iconPngBytes(kind, 34) : null;
+  const iconBytes = kind ? await getDocxCategoryIcon(kind) : null;
 
   const firstPara = new Paragraph({
     alignment: AlignmentType.LEFT,
     spacing: STYLE.spacing.cell,
     children: [
       ...(iconBytes
-        ? [new ImageRun({ data: iconBytes, transformation: { width: 16, height: 16 } }), new TextRun({ text: "  ", size: STYLE.font.cell })]
+        ? [new ImageRun({ data: iconBytes, transformation: { width: 42, height: 42 } }), new TextRun({ text: "  ", size: STYLE.font.cell })]
         : []),
       new TextRun({ text: firstLine, size: STYLE.font.cell }),
     ],
@@ -2306,11 +2403,15 @@ async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
     if (!res.ok) throw new Error(`Photo fetch failed: ${res.status}`);
 
     const blob = await res.blob();
-    if (blob.type === "image/webp") {
+    const type = String(blob.type || "").toLowerCase();
+
+    // DOCX image rendering is most reliable with PNG/JPEG.
+    // Convert GIF/WEBP/SVG/AVIF/BMP and other browser-decodable formats to PNG first.
+    if (type && type !== "image/png" && type !== "image/jpeg" && type !== "image/jpg") {
       const pngBytes = await blobToPngBytes(blob);
       if (pngBytes) return pngBytes;
     }
@@ -2769,32 +2870,78 @@ async function getPointsForReport(supabase: any, reportId: string) {
 
   const reportDifficulty = normalizeMovement(report?.difficulty ?? "");
 
+  const patchRows = (rows: any[]) =>
+    (rows || []).map((row: any) => ({
+      ...row,
+      __report_difficulty: reportDifficulty,
+      __report_category: report?.category ?? "",
+      __report_description: report?.description ?? "",
+      __report_remarks_action: report?.remarks_action ?? "",
+    }));
+
+  // 1) Highest priority: points saved directly for this report.
+  // Newly added manual points are inserted into report_path_points, so check it first.
+  try {
+    const directTables = ["report_path_points", "report_points", "report_items"];
+    const directFks = ["report_id", "reportId"];
+
+    for (const table of directTables) {
+      const probe = await supabase.from(table).select("*").limit(1);
+      if (probe.error) continue;
+
+      for (const fk of directFks) {
+        let query = supabase.from(table).select("*").eq(fk, reportId);
+        if (["report_path_points", "report_points", "report_items", "route_points"].includes(table)) {
+          query = query.order("seq", { ascending: true, nullsFirst: false });
+        }
+        const { data, error } = await query;
+        if (!error && Array.isArray(data) && data.length) {
+          return { points: patchRows(data), report, routeId };
+        }
+      }
+    }
+  } catch {}
+
+  // 2) Fallback: legacy/mixed sources. Keep report-linked lookups ahead of route/project lookups.
   for (const table of TABLE_CANDIDATES) {
     try {
       const probe = await supabase.from(table).select("*").limit(1);
       if (probe.error) continue;
 
-      for (const fk of FK_CANDIDATES) {
-        const targetValue =
-          fk.toLowerCase().includes("route") ? routeId : fk.toLowerCase().includes("project") ? projectId : reportId;
+      const orderedFks = [...FK_CANDIDATES].sort((a, b) => {
+        const rank = (fk: string) => {
+          const t = fk.toLowerCase();
+          if (t.includes("report")) return 0;
+          if (t.includes("route")) return 1;
+          if (t.includes("project")) return 2;
+          return 3;
+        };
+        return rank(a) - rank(b);
+      });
+
+      for (const fk of orderedFks) {
+        const targetValue = fk.toLowerCase().includes("route")
+          ? routeId
+          : fk.toLowerCase().includes("project")
+            ? projectId
+            : reportId;
 
         if (!targetValue) continue;
 
-        const { data, error } = await supabase.from(table).select("*").eq(fk, targetValue);
+        let query = supabase.from(table).select("*").eq(fk, targetValue);
+        if (["report_path_points", "report_points", "report_items", "route_points"].includes(table)) {
+          query = query.order("seq", { ascending: true, nullsFirst: false });
+        }
+        const { data, error } = await query;
+
         if (!error && Array.isArray(data) && data.length) {
-          const patched = (data || []).map((row: any) => ({
-            ...row,
-            __report_difficulty: reportDifficulty,
-            __report_category: report?.category ?? "",
-            __report_description: report?.description ?? "",
-      __report_remarks_action: report?.remarks_action ?? "",
-          }));
-          return { points: patched, report, routeId };
+          return { points: patchRows(data), report, routeId };
         }
       }
     } catch {}
   }
 
+  // 3) Last fallback: single lat/lon on the report row itself.
   if (report?.loc_lat && report?.loc_lon) {
     return {
       points: [
@@ -2806,6 +2953,7 @@ async function getPointsForReport(supabase: any, reportId: string) {
           __report_difficulty: reportDifficulty,
           __report_category: report?.category ?? "",
           __report_description: report?.description ?? "",
+          __report_remarks_action: report?.remarks_action ?? "",
         },
       ],
       report,
@@ -2814,7 +2962,9 @@ async function getPointsForReport(supabase: any, reportId: string) {
   }
 
   throw new Error(
-    `Points not found.\nreport_id=${reportId}\nroute_id=${routeId || "NULL"} project_id=${projectId || "NULL"}`
+    `Points not found.
+report_id=${reportId}
+route_id=${routeId || "NULL"} project_id=${projectId || "NULL"}`
   );
 }
 
@@ -2867,18 +3017,31 @@ children: [
  * ✅ FULL-PAGE PHOTO LAYOUT (one photo per page)
  * Top info table (green header) + big centered photo
  * ========================= */
-function photoPageHeaderCell(text: string, widthPct: number) {
+function getPhotoTheme(movement: string) {
+  const mm = normalizeMovement(movement);
+  if (mm === "green") return PHOTO_THEME.green;
+  if (mm === "yellow") return PHOTO_THEME.yellow;
+  if (mm === "red") return PHOTO_THEME.red;
+  return PHOTO_THEME.default;
+}
+
+function photoPageHeaderCell(
+  text: string,
+  widthPct: number,
+  fillColor: string,
+  textColor: string = "FFFFFF"
+) {
   return new TableCell({
     width: { size: widthPct, type: WidthType.PERCENTAGE },
     verticalAlign: VerticalAlign.CENTER,
-    shading: { type: ShadingType.CLEAR, fill: PHOTO_PAGE_HEADER_FILL },
+    shading: { type: ShadingType.CLEAR, fill: fillColor },
     borders: CELL_BORDERS,
     margins: { top: 220, bottom: 220, left: 160, right: 160 } as any,
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: STYLE.spacing.none,
-        children: [new TextRun({ text, bold: true, color: "FFFFFF", size: 32 })],
+        children: [new TextRun({ text, bold: true, color: textColor, size: 32 })],
       }),
     ],
   });
@@ -2888,7 +3051,8 @@ function photoPageValueCell(
   text: string,
   widthPct: number,
   align: AlignmentType = AlignmentType.LEFT,
-  fillColor: string = PHOTO_PAGE_ROW_FILL
+  fillColor: string = PHOTO_PAGE_ROW_FILL,
+  textColor: string = PHOTO_THEME.default.text
 ) {
   const lines = splitLines(text);
   return new TableCell({
@@ -2901,7 +3065,7 @@ function photoPageValueCell(
       new Paragraph({
         alignment: align,
         spacing: STYLE.spacing.cell,
-        children: [new TextRun({ text: ln, bold: true, size: 32, color: "0B3D2E" })],
+        children: [new TextRun({ text: ln, bold: true, size: 32, color: textColor })],
       })
     ),
   });
@@ -2947,7 +3111,7 @@ async function photoPageCategoryCell(
   fillColor: string
 ) {
   const kind = detectDetailKind(detailsText || "");
-  const iconBytes = kind ? await iconPngBytes(kind, 120) : null;
+  const iconBytes = kind ? await getDocxCategoryIcon(kind) : null;
   const categoryText = String(detailsText || "").trim() || "—";
 
   const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
@@ -2959,7 +3123,7 @@ async function photoPageCategoryCell(
       new TableRow({
         children: [
           new TableCell({
-            width: { size: 18, type: WidthType.PERCENTAGE },
+            width: { size: 28, type: WidthType.PERCENTAGE },
             borders: { top: none, bottom: none, left: none, right: none },
             verticalAlign: VerticalAlign.TOP,
             children: [
@@ -2967,13 +3131,13 @@ async function photoPageCategoryCell(
                 alignment: AlignmentType.CENTER,
                 spacing: { before: 80, after: 0 },
                 children: iconBytes
-                  ? [new ImageRun({ data: iconBytes, transformation: { width: 18, height: 18 } })]
+                  ? [new ImageRun({ data: iconBytes, transformation: { width: 58, height: 58 } })]
                   : [new TextRun({ text: "", size: 2 })],
               }),
             ],
           }),
           new TableCell({
-            width: { size: 82, type: WidthType.PERCENTAGE },
+            width: { size: 72, type: WidthType.PERCENTAGE },
             borders: { top: none, bottom: none, left: none, right: none },
             verticalAlign: VerticalAlign.TOP,
             children: [
@@ -3024,7 +3188,7 @@ function photoPageObservationCell(
 async function photoPageObsCell(detailsText: string, descText: string, widthPct: number) {
   const kind = detectDetailKind(detailsText || "");
   // High-res source so the icon stays sharp even when displayed
-  const iconBytes = kind ? await iconPngBytes(kind, 120) : null;
+  const iconBytes = kind ? await getDocxCategoryIcon(kind) : null;
 
   const d1 = String(detailsText || "").trim();
   const d2 = String(descText || "").trim();
@@ -3055,7 +3219,7 @@ async function photoPageObsCell(detailsText: string, descText: string, widthPct:
                 alignment: AlignmentType.RIGHT,
                 spacing: STYLE.spacing.none,
                 children: iconBytes
-                  ? [new ImageRun({ data: iconBytes, transformation: { width: 34, height: 34 } })]
+                  ? [new ImageRun({ data: iconBytes, transformation: { width: 46, height: 46 } })]
                   : [],
               }),
             ],
@@ -3534,7 +3698,11 @@ async function buildPhotoPageSection(
   }
   if (!locText) locText = "—";
 
-  const rowFill = routeDifficultyFill(p.movement);
+  const theme = getPhotoTheme(p.movement);
+  const rowFill = theme.body;
+  const headerFill = theme.header;
+  const bodyTextColor = theme.text;
+
   const categoryCell = await photoPageCategoryCell(p.details || "—", 15, rowFill);
   const observationCell = photoPageObservationCell(p.description || "", 19, rowFill);
   const remarksCell = photoPageObservationCell(
@@ -3549,20 +3717,20 @@ async function buildPhotoPageSection(
     rows: [
       new TableRow({
         children: [
-          photoPageHeaderCell("GPS\nLOCATION", 18),
-          photoPageHeaderCell("KM", 12),
-          photoPageHeaderCell("LOCATION", 20),
-          photoPageHeaderCell("CATEGORY", 15),
-          photoPageHeaderCell("OBSERVATION", 19),
-          photoPageHeaderCell("REMARKS / ACTION", 16),
+          photoPageHeaderCell("GPS\nLOCATION", 18, headerFill, "000000"),
+          photoPageHeaderCell("KM", 12, headerFill, "000000"),
+          photoPageHeaderCell("LOCATION", 20, headerFill, "000000"),
+          photoPageHeaderCell("CATEGORY", 15, headerFill, "000000"),
+          photoPageHeaderCell("OBSERVATION", 19, headerFill, "000000"),
+          photoPageHeaderCell("REMARKS / ACTION", 16, headerFill, "000000"),
         ],
       }),
       new TableRow({
         height: { value: 3200, rule: HeightRule.ATLEAST },
         children: [
-          photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT, rowFill),
-          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER, rowFill),
-          photoPageValueCell(locText, 20, AlignmentType.LEFT, rowFill),
+          photoPageValueCell(p.ne_coordinate || "—", 18, AlignmentType.LEFT, rowFill, bodyTextColor),
+          photoPageValueCell(p.kms || "—", 12, AlignmentType.CENTER, rowFill, bodyTextColor),
+          photoPageValueCell(locText, 20, AlignmentType.LEFT, rowFill, bodyTextColor),
           categoryCell,
           observationCell,
           remarksCell,

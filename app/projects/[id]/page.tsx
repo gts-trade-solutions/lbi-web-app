@@ -33,6 +33,7 @@ type ReportRow = {
   route_id?: string | null;
   category?: string | null;
   description?: string | null;
+  remarks_action?: string | null;
   created_at: string;
   difficulty?: VehicleMovement | null; // ✅ DB column
   sort_order?: number | null; // ✅ NEW (for inserting at exact position)
@@ -362,7 +363,7 @@ export default function ProjectReportsPage() {
 
     let query = supabase
       .from("reports")
-      .select("id, project_id, route_id, category, description, created_at, difficulty, sort_order")
+      .select("id, project_id, route_id, category, description, remarks_action, created_at, difficulty, sort_order")
       .eq("project_id", projectId)
       .order("sort_order", { ascending: dir === "asc", nullsFirst: false })
       .order("created_at", { ascending: dir === "asc" });
@@ -558,7 +559,7 @@ export default function ProjectReportsPage() {
       if (cErr) throw cErr;
 
       if (!count || count < 1) {
-        setGaSetupReason("GA drawing images are not added for this project. Please upload at least 1 image.");
+        setGaSetupReason("GA drawing files are not added for this project. Please upload at least 1 image or PDF.");
         setGaExistingPageId(page.id);
         setGaSetupOpen(true);
         return;
@@ -943,7 +944,7 @@ export default function ProjectReportsPage() {
     if (insErr) throw insErr;
   }
 
-  const insertReportAfter = async (afterId: string, payload: { category: string; description: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => {
+  const insertReportAfter = async (afterId: string, payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => {
     if (!projectId) return;
 
     // make sure we have latest list order in memory
@@ -994,6 +995,7 @@ export default function ProjectReportsPage() {
         user_id: userId,
         category: payload.category || "Report",
         description: payload.description || null,
+        remarks_action: payload.remarksAction?.trim() || null,
         difficulty: payload.difficulty ? payload.difficulty : "green",
         created_at: nowIso,
         sort_order: newOrder,
@@ -1784,11 +1786,12 @@ function InsertReportModal({
 }: {
   afterIndex: number;
   onClose: () => void;
-  onCreate: (payload: { category: string; description: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => void | Promise<void>;
+  onCreate: (payload: { category: string; description: string; remarksAction: string; difficulty: VehicleMovement; files: File[]; pointsText?: string }) => void | Promise<void>;
 }) {
   const [category, setCategory] = useState("");
   const [customCategory, setCustomCategory] = useState("");
   const [description, setDescription] = useState("");
+  const [remarksAction, setRemarksAction] = useState("");
   const [pointsText, setPointsText] = useState("");
   const [difficulty, setDifficulty] = useState<VehicleMovement>("");
   const [files, setFiles] = useState<File[]>([]);
@@ -1814,6 +1817,7 @@ function InsertReportModal({
       await onCreate({
       category: finalCategory,
       description: description.trim(),
+      remarksAction: remarksAction.trim(),
       difficulty,
       files,
       pointsText: pointsText.trim(),
@@ -1908,6 +1912,26 @@ function InsertReportModal({
 
 
         <div style={{ display: "grid", gap: 8 }}>
+          <div style={styles.routeLabel}>Remarks / Action</div>
+          <textarea
+            value={remarksAction}
+            onChange={(e) => setRemarksAction(e.target.value)}
+            placeholder="Type remarks / action"
+            style={{
+              width: "100%",
+              minHeight: 90,
+              borderRadius: 14,
+              border: "1px solid #D0D5DD",
+              padding: "12px 14px",
+              fontSize: 14,
+              fontWeight: 700,
+              outline: "none",
+              resize: "vertical",
+            }}
+          />
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
           <div style={styles.routeLabel}>Route difficulty</div>
           <select
             value={difficulty || ""}
@@ -1952,7 +1976,7 @@ function InsertReportModal({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf,application/pdf"
             multiple
             style={{ display: "none" }}
             onChange={(e) => {
@@ -2260,6 +2284,12 @@ function RouteSetupModal({
 
   const removeGaAt = (idx: number) => setGaFiles((p) => p.filter((_, i) => i !== idx));
 
+  const isPdfFile = (file: File) => {
+    const name = String(file?.name || "").toLowerCase();
+    const type = String(file?.type || "").toLowerCase();
+    return type === "application/pdf" || name.endsWith(".pdf");
+  };
+
   // ✅ Load existing setup when editing (best-effort)
   useEffect(() => {
     if (!existingPageId) return;
@@ -2332,7 +2362,7 @@ function RouteSetupModal({
 
       // Must have at least 1 GA image to proceed
       if (!gaFiles.length) {
-        throw new Error("Please upload at least 1 GA drawing image.");
+        throw new Error("Please upload at least 1 GA drawing file (image or PDF).");
       }
 
       let preset_map_key: string | null = null;
@@ -2663,14 +2693,14 @@ function RouteSetupModal({
           </div>
         </div>
 
-        {/* GA images */}
+        {/* GA files */}
         <div style={{ display: "grid", gap: 8 }}>
-          <div style={styles.routeLabel}>GA Drawing Images (required)</div>
+          <div style={styles.routeLabel}>GA Drawing Files (required)</div>
 
           <input
             ref={gaInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf,application/pdf"
             multiple
             style={{ display: "none" }}
             onChange={(e) => {
@@ -2683,7 +2713,7 @@ function RouteSetupModal({
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button type="button" style={styles.btnPrimary} onClick={() => gaInputRef.current?.click()}>
-              Add GA images
+              Add GA files
             </button>
             <button type="button" style={styles.btnGhost} onClick={() => setGaFiles([])} disabled={!gaFiles.length}>
               Clear
@@ -2701,59 +2731,101 @@ function RouteSetupModal({
                 color: "#667085",
               }}
             >
-              No GA images selected.
+              No GA files selected.
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              {gaPreviews.map((p, idx) => (
-                <div key={`${p.name}-${idx}`} style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div
+              {gaPreviews.map((p, idx) => {
+                const file = gaFiles[idx];
+                const isPdf = file ? isPdfFile(file) : false;
+
+                return (
+                  <div key={`${p.name}-${idx}`} style={{ border: "1px solid #EAECF0", borderRadius: 16, padding: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontWeight: 950,
+                            color: "#101828",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {p.name}
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>
+                          {(p.size / 1024).toFixed(1)} KB {isPdf ? "• PDF" : "• Image"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeGaAt(idx)}
                         style={{
-                          fontWeight: 950,
-                          color: "#101828",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
+                          padding: "8px 10px",
+                          borderRadius: 12,
+                          border: "1px solid #FECDD6",
+                          background: "#FFF1F3",
+                          color: "#B42318",
+                          fontWeight: 900,
+                          cursor: "pointer",
                         }}
                       >
-                        {p.name}
-                      </div>
-                      <div style={{ fontSize: 12, fontWeight: 800, color: "#667085" }}>{(p.size / 1024).toFixed(1)} KB</div>
+                        Remove
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => removeGaAt(idx)}
+
+                    <div
                       style={{
-                        padding: "8px 10px",
-                        borderRadius: 12,
-                        border: "1px solid #FECDD6",
-                        background: "#FFF1F3",
-                        color: "#B42318",
-                        fontWeight: 900,
-                        cursor: "pointer",
+                        marginTop: 10,
+                        borderRadius: 14,
+                        overflow: "hidden",
+                        border: "1px solid #EAECF0",
+                        background: "#F9FAFB",
+                        height: GA_PREVIEW_HEIGHT,
                       }}
                     >
-                      Remove
-                    </button>
+                      {isPdf ? (
+                        <div
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            display: "grid",
+                            placeItems: "center",
+                            padding: 16,
+                            textAlign: "center",
+                            gap: 10,
+                          }}
+                        >
+                          <div style={{ fontSize: 44 }}>📄</div>
+                          <div style={{ fontWeight: 900, color: "#101828" }}>PDF selected</div>
+                          <a
+                            href={p.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{
+                              textDecoration: "none",
+                              padding: "10px 12px",
+                              borderRadius: 12,
+                              border: "1px solid #D0D5DD",
+                              color: "#344054",
+                              fontWeight: 900,
+                              background: "#fff",
+                            }}
+                          >
+                            Open PDF Preview
+                          </a>
+                        </div>
+                      ) : (
+                        <>
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={p.url} alt="GA preview" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                        </>
+                      )}
+                    </div>
                   </div>
-
-                  <div
-                    style={{
-                      marginTop: 10,
-                      borderRadius: 14,
-                      overflow: "hidden",
-                      border: "1px solid #EAECF0",
-                      background: "#F9FAFB",
-                      height: GA_PREVIEW_HEIGHT,
-                    }}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.url} alt="GA preview" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
