@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
 import { supabase } from "../../lib/supabaseClient";
@@ -337,6 +336,56 @@ function parseSingleCoordinate(value: string, kind: "lat" | "lon"): number | nul
   return null;
 }
 
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function getRoadDistanceKm(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number
+): Promise<number> {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${encodeURIComponent(
+      fromLon
+    )},${encodeURIComponent(fromLat)};${encodeURIComponent(
+      toLon
+    )},${encodeURIComponent(toLat)}?overview=false`;
+
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      return haversineKm(fromLat, fromLon, toLat, toLon);
+    }
+
+    const data = await res.json();
+    const meters = data?.routes?.[0]?.distance;
+
+    if (!Number.isFinite(meters)) {
+      return haversineKm(fromLat, fromLon, toLat, toLon);
+    }
+
+    return Number(meters) / 1000;
+  } catch {
+    return haversineKm(fromLat, fromLon, toLat, toLon);
+  }
+}
+
 async function readWorkbookRows(file: File): Promise<string[][]> {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array" });
@@ -520,6 +569,13 @@ function getDuplicates(values: string[]) {
   return Array.from(dup).sort((a, b) => a.localeCompare(b));
 }
 
+async function sha256File(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export default function ProjectsPage() {
   const router = useRouter();
 
@@ -534,6 +590,13 @@ export default function ProjectsPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [creating, setCreating] = useState(false);
+
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string>("");
+  const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingProjectId, setDeletingProjectId] = useState<string>("");
 
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkProjectId, setBulkProjectId] = useState<string>("");
@@ -728,6 +791,136 @@ export default function ProjectsPage() {
     }
   };
 
+  const openEditModal = (project: ProjectRow) => {
+    setEditingProjectId(project.id);
+    setEditName(safeName(project));
+    setEditDesc(project.description || "");
+    setEditOpen(true);
+  };
+
+  const updateProject = async () => {
+    const name = editName.trim();
+    if (!editingProjectId) return;
+    if (!name) return alert("Project name is required");
+
+    try {
+      setSavingEdit(true);
+
+      const {
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
+
+      if (sessionErr) throw sessionErr;
+      if (!session?.user) {
+        redirectToLogin();
+        return;
+      }
+
+      const { error } = await supabase
+        .from("projects")
+        .update({
+          name,
+          description: editDesc.trim() || null,
+          last_modified_by: session.user.id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", editingProjectId);
+
+      if (error) throw error;
+
+      setEditOpen(false);
+      setEditingProjectId("");
+      setEditName("");
+      setEditDesc("");
+      await load();
+    } catch (e: any) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
+        redirectToLogin();
+        return;
+      }
+      alert(e?.message || String(e));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const deleteProject = async (project: ProjectRow) => {
+    const projectName = safeName(project);
+    const confirmed = window.confirm(
+      `Delete project \"${projectName}\"? This will also delete related reports, photos, path points, and bulk import history for this project.`
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setDeletingProjectId(project.id);
+
+      const { data: reportRows, error: reportFetchError } = await supabase
+        .from("reports")
+        .select("id")
+        .eq("project_id", project.id);
+
+      if (reportFetchError) throw reportFetchError;
+
+      const reportIds = (reportRows || []).map((row: any) => row.id).filter(Boolean);
+
+      if (reportIds.length) {
+        const { error: pathDeleteError } = await supabase
+          .from("report_path_points")
+          .delete()
+          .in("report_id", reportIds);
+
+        if (pathDeleteError) throw pathDeleteError;
+
+        const { error: photosDeleteError } = await supabase
+          .from("report_photos")
+          .delete()
+          .in("report_id", reportIds);
+
+        if (photosDeleteError) throw photosDeleteError;
+      }
+
+      const { error: reportsDeleteError } = await supabase
+        .from("reports")
+        .delete()
+        .eq("project_id", project.id);
+
+      if (reportsDeleteError) throw reportsDeleteError;
+
+      const { error: historyDeleteError } = await supabase
+        .from("bulk_import_history")
+        .delete()
+        .eq("project_id", project.id);
+
+      if (historyDeleteError) throw historyDeleteError;
+
+      const { error: projectDeleteError } = await supabase
+        .from("projects")
+        .delete()
+        .eq("id", project.id);
+
+      if (projectDeleteError) throw projectDeleteError;
+
+      if (bulkProjectId === project.id) {
+        setBulkProjectId("");
+      }
+
+      await load();
+      alert("Project deleted successfully.");
+    } catch (e: any) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
+        redirectToLogin();
+        return;
+      }
+      alert(e?.message || String(e));
+    } finally {
+      setDeletingProjectId("");
+    }
+  };
+
   const resetBulk = () => {
     setMasterFile(null);
     setImageFiles([]);
@@ -741,31 +934,14 @@ export default function ProjectsPage() {
     if (imagesInputRef.current) imagesInputRef.current.value = "";
   };
 
-  const haversineKm = (
-    lat1: number,
-    lon1: number,
-    lat2: number,
-    lon2: number
-  ) => {
-    const toRad = (v: number) => (v * Math.PI) / 180;
-    const R = 6371;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(toRad(lat1)) *
-        Math.cos(toRad(lat2)) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  };
-
   const getLocationName = async (lat: number, lng: number): Promise<string> => {
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
           lat
-        )}&lon=${encodeURIComponent(lng)}`,
+        )}&lon=${encodeURIComponent(
+          lng
+        )}&addressdetails=1&zoom=18`,
         {
           headers: {
             Accept: "application/json",
@@ -778,23 +954,40 @@ export default function ProjectsPage() {
       const data = await res.json();
       const addr = data?.address || {};
 
+      const houseNumber = addr.house_number || "";
       const road =
-        addr.road || addr.pedestrian || addr.suburb || addr.neighbourhood || "";
-      const area =
+        addr.road ||
+        addr.pedestrian ||
+        addr.footway ||
+        addr.cycleway ||
+        addr.path ||
+        addr.residential ||
+        "";
+      const suburb =
         addr.suburb ||
         addr.neighbourhood ||
-        addr.city_district ||
+        addr.hamlet ||
         addr.village ||
-        addr.town ||
-        addr.city ||
         "";
-      const city = addr.city || addr.town || addr.village || addr.county || "";
+      const city =
+        addr.city ||
+        addr.town ||
+        addr.municipality ||
+        addr.county ||
+        addr.state_district ||
+        "";
+      const state = addr.state || "";
+      const postcode = addr.postcode || "";
 
-      const parts = [road, area, city].filter(
+      const line1 = [houseNumber, road].filter(Boolean).join(" ").trim();
+
+      const parts = [line1, suburb, city, state, postcode].filter(
         (value, index, arr) => value && arr.indexOf(value) === index
       );
 
-      return parts.length ? parts.join(", ") : data?.display_name || `${lat}, ${lng}`;
+      if (parts.length) return parts.join(", ");
+
+      return data?.display_name || `${lat}, ${lng}`;
     } catch {
       return `${lat}, ${lng}`;
     }
@@ -814,14 +1007,17 @@ export default function ProjectsPage() {
     for (let index = 0; index < sorted.length; index += 1) {
       const row = sorted[index];
 
+      let legKm = 0;
+
       if (index > 0) {
         const prev = sorted[index - 1];
-        cumulativeKm += haversineKm(
+        legKm = await getRoadDistanceKm(
           prev.latitude,
           prev.longitude,
           row.latitude,
           row.longitude
         );
+        cumulativeKm += legKm;
       }
 
       const location = await getLocationName(row.latitude, row.longitude);
@@ -832,6 +1028,7 @@ export default function ProjectsPage() {
         latitude: row.latitude,
         longitude: row.longitude,
         location,
+        leg_kms: index === 0 ? "0.0000" : legKm.toFixed(4),
         kms: cumulativeKm.toFixed(4),
         category: row.category || "",
         description: row.description || "",
@@ -934,12 +1131,63 @@ export default function ProjectsPage() {
         return;
       }
 
+      const masterFileHash = await sha256File(masterFile);
+
+      const { data: existingImportRows, error: existingImportErr } = await supabase
+        .from("bulk_import_history")
+        .select("id")
+        .eq("project_id", bulkProjectId)
+        .eq("master_file_hash", masterFileHash)
+        .limit(1);
+
+      if (existingImportErr) throw existingImportErr;
+
+      if (existingImportRows && existingImportRows.length > 0) {
+        alert("This master file has already been imported for this project.");
+        return;
+      }
+
       const combinedRows = await parseCombinedFile(masterFile);
 
       if (!combinedRows.length) {
         throw new Error(
           "No valid rows found in master file. Check point_key, latitude, longitude, category, and file values."
         );
+      }
+
+      const incomingPointKeys = Array.from(
+        new Set(
+          combinedRows
+            .map((row) => String(row.point_key || "").trim())
+            .filter(Boolean)
+        )
+      );
+
+      if (!incomingPointKeys.length) {
+        throw new Error("No valid point_key values found in master file.");
+      }
+
+      const { data: existingPointRows, error: existingPointErr } = await supabase
+        .from("reports")
+        .select("point_key")
+        .eq("project_id", bulkProjectId)
+        .in("point_key", incomingPointKeys);
+
+      if (existingPointErr) throw existingPointErr;
+
+      const existingPointKeys = Array.from(
+        new Set(
+          (existingPointRows || [])
+            .map((row: any) => String(row.point_key || "").trim())
+            .filter(Boolean)
+        )
+      );
+
+      if (existingPointKeys.length > 0) {
+        alert(
+          `Import blocked. These point_key values already exist in this project: ${existingPointKeys.join(", ")}`
+        );
+        return;
       }
 
       const pointsMap = new Map<string, ParsedPointRow>();
@@ -1011,9 +1259,7 @@ export default function ProjectsPage() {
 
       if (missingPointKeysInPointsCsv.length) {
         throw new Error(
-          `These point_key values are used in master file image mapping but missing in points data: ${missingPointKeysInPointsCsv.join(
-            ", "
-          )}`
+          `These point_key values are used in master file image mapping but missing in points data: ${missingPointKeysInPointsCsv.join(", ")}`
         );
       }
 
@@ -1045,6 +1291,7 @@ export default function ProjectsPage() {
           .insert([
             {
               project_id: bulkProjectId,
+              point_key: null,
               category: noGpsCategory,
               description: "Images that do not have GPS point mapping (bulk import).",
               route_id: null,
@@ -1081,67 +1328,32 @@ export default function ProjectsPage() {
         const difficulty = normalizeDifficulty(p.difficulty || "green");
         const nowIso = new Date().toISOString();
 
-        const { data: found, error: fErr } = await supabase
+        const { data: created, error: cErr } = await supabase
           .from("reports")
+          .insert([
+            {
+              project_id: bulkProjectId,
+              point_key: key,
+              category,
+              description,
+              route_id: null,
+              difficulty,
+              remarks_action: p.remarks_action?.trim() || null,
+              loc_lat: p.latitude,
+              loc_lon: p.longitude,
+              loc_acc: null,
+              loc_time: nowIso,
+            },
+          ])
           .select("id")
-          .eq("project_id", bulkProjectId)
-          .eq("category", category)
-          .eq("description", description)
-          .order("created_at", { ascending: false })
-          .limit(1);
+          .single();
 
-        if (fErr) throw fErr;
+        if (cErr) throw cErr;
 
-        let reportId: string | null = found && found.length ? found[0].id : null;
-
-        if (!reportId) {
-          const { data: created, error: cErr } = await supabase
-            .from("reports")
-            .insert([
-              {
-                project_id: bulkProjectId,
-                category,
-                description,
-                route_id: null,
-                difficulty,
-                remarks_action: p.remarks_action?.trim() || null,
-                loc_lat: p.latitude,
-                loc_lon: p.longitude,
-                loc_acc: null,
-                loc_time: nowIso,
-              },
-            ])
-            .select("id")
-            .single();
-
-          if (cErr) throw cErr;
-          reportId = created?.id ?? null;
-        }
-
-        if (!reportId) throw new Error(`Failed to create/find report for point_key=${key}`);
-
-        const { error: rptUpdErr } = await supabase
-          .from("reports")
-          .update({
-            difficulty,
-            remarks_action: p.remarks_action?.trim() || null,
-            loc_lat: p.latitude,
-            loc_lon: p.longitude,
-            loc_acc: null,
-            loc_time: nowIso,
-          })
-          .eq("id", reportId);
-
-        if (rptUpdErr) throw rptUpdErr;
+        const reportId = created?.id ?? null;
+        if (!reportId) throw new Error(`Failed to create report for point_key=${key}`);
 
         reportIdByPointKey.set(key, reportId);
-
-        const { error: delErr } = await supabase
-          .from("report_path_points")
-          .delete()
-          .eq("report_id", reportId);
-
-        if (delErr) throw delErr;
 
         const { error: insErr } = await supabase
           .from("report_path_points")
@@ -1197,7 +1409,7 @@ export default function ProjectsPage() {
         }
 
         const safeFileName = file.name.replace(/[^\w.\-]+/g, "_");
-        const storagePath = `reports/${bulkProjectId}/${reportId}/${Date.now()}_${safeFileName}`;
+        const storagePath = `reports/${bulkProjectId}/${reportId}/${safeFileName}`;
 
         let uploaded: { path: string; publicUrl: string };
         try {
@@ -1217,22 +1429,51 @@ export default function ProjectsPage() {
 
         const { width, height } = await getImageSize(file);
 
-        const { error: insErr } = await supabase.from("report_photos").insert([
-          {
-            report_id: reportId,
-            url,
-            width,
-            height,
-          },
-        ]);
+        const { data: existingPhotoRows, error: existingPhotoErr } = await supabase
+          .from("report_photos")
+          .select("id")
+          .eq("report_id", reportId)
+          .eq("url", url)
+          .limit(1);
 
-        if (insErr) {
-          errors.push(`${file.name}: report_photos insert failed - ${insErr.message}`);
+        if (existingPhotoErr) {
+          errors.push(`${file.name}: photo check failed - ${existingPhotoErr.message}`);
           return;
         }
 
-        photosInserted++;
+        const alreadyExists =
+          Array.isArray(existingPhotoRows) && existingPhotoRows.length > 0;
+
+        if (!alreadyExists) {
+          const { error: insErr } = await supabase.from("report_photos").insert([
+            {
+              report_id: reportId,
+              url,
+              width,
+              height,
+            },
+          ]);
+
+          if (insErr) {
+            errors.push(`${file.name}: report_photos insert failed - ${insErr.message}`);
+            return;
+          }
+
+          photosInserted++;
+        }
       });
+
+      const { error: historyErr } = await supabase
+        .from("bulk_import_history")
+        .insert([
+          {
+            project_id: bulkProjectId,
+            master_file_name: masterFile.name,
+            master_file_hash: masterFileHash,
+          },
+        ]);
+
+      if (historyErr) throw historyErr;
 
       setSummary({
         pointsRead: points.length,
@@ -1255,6 +1496,10 @@ export default function ProjectsPage() {
           ? "Bulk import completed with some warnings/errors. Check summary."
           : "Bulk import completed."
       );
+
+      setBulkOpen(false);
+      resetBulk();
+      await load();
     } catch (e: any) {
       const msg = String(e?.message || e || "").toLowerCase();
       if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {
@@ -1337,35 +1582,74 @@ export default function ProjectsPage() {
             const name = safeName(p);
             const dt = p.created_at ? new Date(p.created_at).toLocaleString() : "";
             const modifiedBy = lastModifiedMap[p.id] || "—";
+            const isDeleting = deletingProjectId === p.id;
 
             return (
-              <Link key={p.id} href={`/projects/${p.id}`} style={styles.card}>
-                <div style={styles.cardTop}>
-                  <div style={styles.cardTitle}>{name}</div>
-                  <span style={styles.badge}>Open</span>
+              <div key={p.id} style={styles.cardWrap}>
+                <div
+                  style={styles.card}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => router.push(`/projects/${p.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      router.push(`/projects/${p.id}`);
+                    }
+                  }}
+                >
+                  <div style={styles.cardTop}>
+                    <div style={styles.cardTitle}>{name}</div>
+                    <span style={styles.badge}>Open</span>
+                  </div>
+
+                  <div style={styles.metaRow}>
+                    <span style={styles.metaLabel}>Project ID</span>
+                    <span style={styles.metaValue} title={p.id}>
+                      {p.id}
+                    </span>
+                  </div>
+
+                  <div style={styles.metaRow}>
+                    <span style={styles.metaLabel}>Created</span>
+                    <span style={styles.metaValue}>{dt || "—"}</span>
+                  </div>
+
+                  <div style={styles.metaRow}>
+                    <span style={styles.metaLabel}>Last modified by</span>
+                    <span style={styles.metaValue} title={modifiedBy}>
+                      {modifiedBy}
+                    </span>
+                  </div>
+
+                  <div style={styles.cardHint}>Click to view reports →</div>
                 </div>
 
-                <div style={styles.metaRow}>
-                  <span style={styles.metaLabel}>Project ID</span>
-                  <span style={styles.metaValue} title={p.id}>
-                    {p.id}
-                  </span>
-                </div>
+                <div style={styles.cardActions}>
+                  <button
+                    type="button"
+                    style={styles.btnGhostSmall}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openEditModal(p);
+                    }}
+                  >
+                    Edit
+                  </button>
 
-                <div style={styles.metaRow}>
-                  <span style={styles.metaLabel}>Created</span>
-                  <span style={styles.metaValue}>{dt || "—"}</span>
+                  <button
+                    type="button"
+                    style={{ ...styles.btnDangerSmall, opacity: isDeleting ? 0.7 : 1 }}
+                    disabled={isDeleting}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteProject(p);
+                    }}
+                  >
+                    {isDeleting ? "Deleting..." : "Delete"}
+                  </button>
                 </div>
-
-                <div style={styles.metaRow}>
-                  <span style={styles.metaLabel}>Last modified by</span>
-                  <span style={styles.metaValue} title={modifiedBy}>
-                    {modifiedBy}
-                  </span>
-                </div>
-
-                <div style={styles.cardHint}>Click to view reports →</div>
-              </Link>
+              </div>
             );
           })}
         </div>
@@ -1414,6 +1698,58 @@ export default function ProjectsPage() {
         </div>
       )}
 
+      {editOpen && (
+        <div
+          style={styles.modalOverlay}
+          onClick={() => {
+            if (!savingEdit) setEditOpen(false);
+          }}
+        >
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 10 }}>
+              Edit Project
+            </div>
+
+            <div style={styles.formRow}>
+              <div style={styles.formLabel}>Project name *</div>
+              <input
+                style={styles.input}
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Project name"
+              />
+            </div>
+
+            <div style={styles.formRow}>
+              <div style={styles.formLabel}>Description</div>
+              <textarea
+                style={styles.textarea}
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+                placeholder="Optional description"
+              />
+            </div>
+
+            <div style={styles.modalActions}>
+              <button
+                style={styles.btnGhost}
+                onClick={() => setEditOpen(false)}
+                disabled={savingEdit}
+              >
+                Cancel
+              </button>
+              <button
+                style={{ ...styles.btnPrimary, opacity: savingEdit ? 0.7 : 1 }}
+                onClick={updateProject}
+                disabled={savingEdit}
+              >
+                {savingEdit ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {bulkOpen && (
         <div style={styles.modalOverlay} onClick={() => setBulkOpen(false)}>
           <div style={styles.modalWide} onClick={(e) => e.stopPropagation()}>
@@ -1456,13 +1792,16 @@ export default function ProjectsPage() {
               <b>N19 10.313</b> and <b>E72 32.578</b>
               <br />
               <br />
-              Combined coordinate columns like <b>coordinates</b> or <b>ne_coordinate</b> are <b>not used</b> in this version.
+              Preview file now includes:
               <br />
-              Actions/difficulty will be stored into <b>reports.difficulty</b> exactly as provided.
+              <b>location</b> = improved reverse geocoded address
               <br />
-              The same action value will also be stored into <b>reports.remarks_action</b>.
+              <b>leg_kms</b> = distance from previous point
               <br />
-              Latitude and longitude will be stored into both <b>reports.loc_lat/loc_lon</b> and <b>report_path_points.latitude/longitude</b>.
+              <b>kms</b> = cumulative route distance
+              <br />
+              <br />
+              One <b>point_key</b> inside one project can be imported only once.
             </div>
 
             <div
@@ -1737,6 +2076,28 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     color: "#B42318",
   },
+  btnGhostSmall: {
+    flex: 1,
+    padding: "9px 10px",
+    borderRadius: 10,
+    border: "1px solid #EAECF0",
+    background: "#fff",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 12,
+    color: "#344054",
+  },
+  btnDangerSmall: {
+    flex: 1,
+    padding: "9px 10px",
+    borderRadius: 10,
+    border: "1px solid #FDA29B",
+    background: "#FEF3F2",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 12,
+    color: "#B42318",
+  },
   searchBar: { marginTop: 14, marginBottom: 14 },
   searchWrap: {
     display: "flex",
@@ -1768,14 +2129,23 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
   },
   grid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 },
+  cardWrap: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
   card: {
     background: "#fff",
     border: "1px solid #EAECF0",
     borderRadius: 16,
     padding: 14,
-    textDecoration: "none",
     color: "#101828",
     boxShadow: "0 1px 2px rgba(16,24,40,0.06)",
+    cursor: "pointer",
+  },
+  cardActions: {
+    display: "flex",
+    gap: 8,
   },
   cardTop: {
     display: "flex",

@@ -188,7 +188,7 @@ const REVERSE_INFLIGHT = new Map<string, Promise<string>>();
 const REVERSE_TIMEOUT_MS = 9000;
 
 function coordKey(lat: number, lon: number) {
-  const r = (n: number) => Math.round(n * 1000) / 1000; // ~100m
+  const r = (n: number) => Math.round(n * 100000) / 100000; // ~1m for better deep-location accuracy
   return `${r(lat)},${r(lon)}`;
 }
 
@@ -200,17 +200,52 @@ function pickFirst(obj: any, keys: string[]) {
   return "";
 }
 
+function compactUniqueParts(parts: string[]) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const p of parts) {
+    const t = String(p || "").trim();
+    if (!t) continue;
+    const key = t.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 function formatOsmAddress(addr: any) {
-  const p1 = pickFirst(addr, ["neighbourhood", "suburb", "quarter", "hamlet"]);
+  const house = pickFirst(addr, ["house_number"]);
+  const road = pickFirst(addr, [
+    "road",
+    "pedestrian",
+    "residential",
+    "service",
+    "footway",
+    "path",
+    "cycleway",
+  ]);
+  const landmark = pickFirst(addr, [
+    "building",
+    "amenity",
+    "shop",
+    "office",
+    "industrial",
+    "commercial",
+    "tourism",
+    "bridge",
+    "tunnel",
+    "man_made",
+    "railway",
+  ]);
+  const p1 = pickFirst(addr, ["neighbourhood", "suburb", "quarter", "hamlet", "locality"]);
   const p2 = pickFirst(addr, ["city_district", "district", "borough", "county", "state_district"]);
   const p3 = pickFirst(addr, ["city", "town", "village", "municipality"]);
-  const parts = [p1, p2, p3].filter(Boolean);
+  const p4 = pickFirst(addr, ["state"]);
 
-  if (parts.length < 2) {
-    const st = pickFirst(addr, ["state"]);
-    if (st) parts.push(st);
-  }
-  return parts.join(", ");
+  const streetLine = [house, road].filter(Boolean).join(" ").trim();
+  const parts = compactUniqueParts([streetLine, landmark, p1, p2, p3, p4]);
+  return parts.slice(0, 6).join(", ");
 }
 
 async function fetchWithTimeout(url: string, ms: number) {
@@ -236,7 +271,7 @@ async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
       const url =
         `https://nominatim.openstreetmap.org/reverse` +
         `?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}` +
-        `&zoom=16&addressdetails=1`;
+        `&zoom=18&addressdetails=1&namedetails=1`;
 
       const res = await fetchWithTimeout(url, REVERSE_TIMEOUT_MS);
       if (!res.ok) return "";
@@ -248,7 +283,7 @@ async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
       const out =
         (label || "").trim() ||
         (json?.display_name
-          ? String(json.display_name).split(",").slice(0, 3).join(",").trim()
+          ? compactUniqueParts(String(json.display_name).split(",").map((x: string) => x.trim())).slice(0, 6).join(", ").trim()
           : "");
 
       if (out) REVERSE_CACHE.set(key, out);
@@ -559,8 +594,9 @@ async function getProjectRouteSetup(
     .from("project_route_page_images")
     .select("id, project_id, project_page_id, file_url, created_at")
     .eq("project_id", projectId)
+    .eq("project_page_id", pr.id)
     .order("created_at", { ascending: true })
-    .limit(10);
+    .limit(20);
 
   if (iErr) throw iErr;
 
@@ -575,6 +611,7 @@ async function getProjectRouteSetup(
     .from("project_route_page_locations")
     .select("label, sort_order")
     .eq("project_id", projectId)
+    .eq("project_page_id", pr.id)
     .order("sort_order", { ascending: true })
     .limit(4);
 
@@ -2300,6 +2337,10 @@ function collectImageStrings(value: any, out: string[] = [], seen = new Set<any>
  * Supabase storage resolve
  * ========================= */
 const BUCKET_CANDIDATES = [
+  "ga-drawings",
+  "ga_drawings",
+  "route-maps",
+  "route_maps",
   "report-photos",
   "report_photos",
   "report-images",
@@ -2398,6 +2439,54 @@ async function blobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
   }
 }
 
+const PDF_JS_PROMISE_KEY = "__docxPdfJsPromise";
+
+async function getPdfJsForDocx() {
+  if (typeof window === "undefined") throw new Error("PDF conversion works only in browser.");
+  const win = window as any;
+  if (!win[PDF_JS_PROMISE_KEY]) {
+    win[PDF_JS_PROMISE_KEY] = (async () => {
+      const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/legacy/build/pdf.worker.min.mjs`;
+      }
+      return pdfjsLib;
+    })();
+  }
+  return win[PDF_JS_PROMISE_KEY];
+}
+
+async function pdfBlobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
+  try {
+    const pdfjsLib = await getPdfJsForDocx();
+    const buffer = await blob.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 2 });
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+
+    await page.render({ canvasContext: context, viewport }).promise;
+
+    const pngBlob: Blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => {
+        if (b) resolve(b);
+        else reject(new Error("Failed to convert PDF page to PNG."));
+      }, "image/png");
+    });
+
+    return new Uint8Array(await pngBlob.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
 async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -2408,6 +2497,12 @@ async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
 
     const blob = await res.blob();
     const type = String(blob.type || "").toLowerCase();
+    const looksPdf = type === "application/pdf" || /\.pdf($|[?#])/i.test(url);
+
+    if (looksPdf) {
+      const pdfBytes = await pdfBlobToPngBytes(blob);
+      if (pdfBytes) return pdfBytes;
+    }
 
     // DOCX image rendering is most reliable with PNG/JPEG.
     // Convert GIF/WEBP/SVG/AVIF/BMP and other browser-decodable formats to PNG first.
@@ -2426,7 +2521,21 @@ async function tryDownloadThenSignedThenPublic(supabase: any, bucket: string, pa
   const dl: any = await safeTimeout(supabase.storage.from(bucket).download(path), DEFAULT_STORAGE_TIMEOUT_MS);
   if (dl && !dl.error && dl.data) {
     try {
-      return await blobToBytes(dl.data);
+      const blob = dl.data as Blob;
+      const type = String(blob?.type || "").toLowerCase();
+      const looksPdf = type === "application/pdf" || /\.pdf$/i.test(path);
+
+      if (looksPdf) {
+        const pdfBytes = await pdfBlobToPngBytes(blob);
+        if (pdfBytes) return pdfBytes;
+      }
+
+      if (type && type !== "image/png" && type !== "image/jpeg" && type !== "image/jpg") {
+        const pngBytes = await blobToPngBytes(blob);
+        if (pngBytes) return pngBytes;
+      }
+
+      return await blobToBytes(blob);
     } catch {}
   }
 
@@ -2693,7 +2802,7 @@ function normalizePoint(raw: any): NormalizedPoint {
   const details = s(
     raw.details ?? raw.remarks ?? raw.note ?? raw.__report_category ?? raw.category ?? ""
   );
-  const location = s(raw.location ?? raw.place ?? raw.area ?? raw.city ?? raw.village ?? "");
+  const location = s(raw.exact_location ?? raw.location_name ?? raw.location_label ?? raw.location ?? raw.place ?? raw.area ?? raw.city ?? raw.village ?? "");
   const photo_refs = Array.from(new Set(collectImageStrings(raw)));
 
   const photo_description = s(
@@ -4303,12 +4412,14 @@ async function buildDoc(opts: {
     if (pid) {
       const setup = await getProjectRouteSetup(opts.supabase, pid);
       if (setup) {
-        const mapBytes = setup.routeMapUrl ? await bytesFromUrlForDocx(setup.routeMapUrl) : null;
+        const mapBytes = setup.routeMapUrl
+          ? await resolvePhotoBytes(opts.supabase, setup.routeMapUrl)
+          : null;
         const gaUrls = (setup.gaImageUrls || []).filter(Boolean);
         const gaBytesList: Uint8Array[] = [];
         for (const u of gaUrls) {
           try {
-            const b = await bytesFromUrlForDocx(u);
+            const b = await resolvePhotoBytes(opts.supabase, u);
             if (b) gaBytesList.push(b);
           } catch {
             // ignore per-image failure

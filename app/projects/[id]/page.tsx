@@ -43,6 +43,7 @@ type WatermarkOpts = { enabled: boolean; text: string };
 
 type ManualPointRow = {
   report_id: string;
+  user_id: string;
   seq: number;
   latitude: number;
   longitude: number;
@@ -835,11 +836,17 @@ export default function ProjectReportsPage() {
       .maybeSingle();
     if (lErr) throw lErr;
 
+    const { data: authData, error: authErr } = await supabase.auth.getUser();
+    if (authErr) throw authErr;
+    const userId = authData.user?.id;
+    if (!userId) throw new Error("Not logged in.");
+
     const startSeq = (lastRow as any)?.seq ? Number((lastRow as any).seq) + 1 : 1;
     const nowIso = new Date().toISOString();
 
     const rows: ManualPointRow[] = parsed.map((p, idx) => ({
       report_id: reportId,
+      user_id: userId,
       seq: startSeq + idx,
       latitude: p.lat,
       longitude: p.lon,
@@ -2290,6 +2297,94 @@ function RouteSetupModal({
     return type === "application/pdf" || name.endsWith(".pdf");
   };
 
+  const PDF_JS_PROMISE_KEY = "__gaUploadPdfJsPromise";
+  const PDF_JS_SCRIPT_ID = "ga-upload-pdfjs-script";
+  const PDF_JS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+  const PDF_JS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  async function getPdfJsForGaUpload() {
+    if (typeof window === "undefined") throw new Error("PDF conversion works only in browser.");
+
+    const win = window as any;
+    if (win.pdfjsLib) {
+      if (!win.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+        win.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_CDN;
+      }
+      return win.pdfjsLib;
+    }
+
+    if (!win[PDF_JS_PROMISE_KEY]) {
+      win[PDF_JS_PROMISE_KEY] = new Promise((resolve, reject) => {
+        const existing = document.getElementById(PDF_JS_SCRIPT_ID) as HTMLScriptElement | null;
+
+        const finish = () => {
+          if (win.pdfjsLib) {
+            if (!win.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+              win.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_CDN;
+            }
+            resolve(win.pdfjsLib);
+          } else {
+            reject(new Error("PDF library failed to load."));
+          }
+        };
+
+        if (existing) {
+          if ((existing as any).dataset.loaded === "true") {
+            finish();
+            return;
+          }
+          existing.addEventListener("load", finish, { once: true });
+          existing.addEventListener("error", () => reject(new Error("Failed to load PDF library.")), { once: true });
+          return;
+        }
+
+        const script = document.createElement("script");
+        script.id = PDF_JS_SCRIPT_ID;
+        script.src = PDF_JS_CDN;
+        script.async = true;
+        script.onload = () => {
+          (script as any).dataset.loaded = "true";
+          finish();
+        };
+        script.onerror = () => reject(new Error("Failed to load PDF library."));
+        document.head.appendChild(script);
+      });
+    }
+
+    return win[PDF_JS_PROMISE_KEY];
+  }
+
+  async function convertPdfFirstPageToPngFile(file: File): Promise<File> {
+    const pdfjsLib = await getPdfJsForGaUpload();
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 2.2 });
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Unable to create canvas for PDF conversion.");
+
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+
+    await page.render({ canvasContext: context, viewport }).promise;
+
+    const pngBlob: Blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("Failed to convert PDF to PNG."));
+      }, "image/png");
+    });
+
+    const baseName = file.name.replace(/\.[^.]+$/i, "") || "ga_drawing";
+    return new File([pngBlob], `${baseName}.png`, {
+      type: "image/png",
+      lastModified: Date.now(),
+    });
+  }
+
+
   // ✅ Load existing setup when editing (best-effort)
   useEffect(() => {
     if (!existingPageId) return;
@@ -2459,22 +2554,34 @@ function RouteSetupModal({
         console.warn("Locations save skipped (table may not exist):", e);
       }
 
-      // Upload GA images + insert rows
+      // Replace existing GA image rows for this page so stale PDFs/old rows do not keep breaking export
+      try {
+        await supabase.from("project_route_page_images").delete().eq("project_id", projectId).eq("project_page_id", pageId);
+      } catch {}
+
+      // Upload GA files + insert rows
+      // ✅ Important fix:
+      // If user uploads a PDF GA drawing, convert page 1 to PNG first and store that PNG in storage + DB.
+      // This makes project_route_page_images behave like normal image rows, so DOCX export can retrieve them directly.
       const rows: any[] = [];
-      for (const f of gaFiles) {
-        const safeName = f.name.replace(/[^\w.\-]+/g, "_");
-        const ext = f.name.split(".").pop() || "jpg";
-        const storagePath = `projects/${projectId}/${pageId}/${Date.now()}_${safeName}.${ext}`;
-        const uploaded = await uploadToBucket("ga-drawings", storagePath, f);
+      for (const originalFile of gaFiles) {
+        const storageFile = isPdfFile(originalFile)
+          ? await convertPdfFirstPageToPngFile(originalFile)
+          : originalFile;
+
+        const safeName = storageFile.name.replace(/[^\w.\-]+/g, "_");
+        const storagePath = `projects/${projectId}/${pageId}/${Date.now()}_${safeName}`;
+        const uploaded = await uploadToBucket("ga-drawings", storagePath, storageFile);
 
         rows.push({
           project_page_id: pageId,
           project_id: projectId,
           user_id: userId,
-          file_url: uploaded.publicUrl,
-          file_name: f.name,
-          mime_type: f.type || null,
-          file_size: f.size || null,
+          // Store storage path for maximum reliability in export; resolver can still load it from bucket
+          file_url: uploaded.path,
+          file_name: storageFile.name,
+          mime_type: storageFile.type || "image/png",
+          file_size: storageFile.size || null,
         });
       }
 
