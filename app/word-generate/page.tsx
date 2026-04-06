@@ -6,8 +6,6 @@ import { useParams } from "next/navigation";
 
 import { supabase } from "../../lib/supabaseClient";
 import {
-  generateProjectDOCX,
-  generateProjectDOCXByReportIds,
   generateProjectGPX,
   generateProjectGPXByReportIds,
 } from "../../lib/download";
@@ -467,142 +465,209 @@ export default function ProjectReportsPage() {
     setDlOpen(true);
   };
 
-  const runExport = async () => {
-    if (!projectId) return;
 
-    if (exportMode === "selectedOne" && stats.selectedCount === 0) {
-      alert("Please select at least 1 report.");
-      return;
-    }
+async function exportDocxViaApi(params: {
+  projectId: string;
+  reportIds: string[];
+  fileName: string;
+  includePhotos: boolean;
+  watermark: { enabled?: boolean; text?: string };
+}) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
 
-    setExportModalOpen(false);
+  const res = await fetch("/api/reports/export/project-docx", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(session?.access_token
+        ? { Authorization: `Bearer ${session.access_token}` }
+        : {}),
+    },
+    body: JSON.stringify(params),
+  });
 
+  if (!res.ok) {
+    let msg = "DOCX export failed.";
     try {
-      if (exportFormat === "gpx") {
-        const base = sanitizeFileBaseName(exportName || projectName);
-        const fileName = `${base}.gpx`;
+      const j = await res.json();
+      msg = j?.message || msg;
+    } catch {}
+    throw new Error(msg);
+  }
 
-        const countForEst = exportMode === "selectedOne" ? stats.selectedCount : Math.max(stats.shown, 1);
-        const est = estimateSeconds(exportMode, countForEst, false);
-        startDlUI("Preparing GPX export…", est);
+  const blob = await res.blob();
+  return { blob, fileName: params.fileName };
+}
 
-        if (exportMode === "all") {
-          const { blob, fileName: fn } = await generateProjectGPX(supabase, projectId, {
-            name: exportName || projectName,
-            fileName,
-          });
-          setPreparedFiles([{ fileName: fn, blob }]);
-          setDlDone(true);
-          return;
-        }
+const runExport = async () => {
+  if (!projectId) return;
 
-        if (exportMode === "selectedOne") {
-          const ids = selectedIdsInOrder;
-          const { blob, fileName: fn } = await generateProjectGPXByReportIds(supabase, projectId, ids, {
-            name: exportName || projectName,
-            fileName,
-          });
-          setPreparedFiles([{ fileName: fn, blob }]);
-          setDlDone(true);
-          return;
-        }
+  if (exportMode === "selectedOne" && stats.selectedCount === 0) {
+    alert("Please select at least 1 report.");
+    return;
+  }
 
-        throw new Error("GPX supports only: Selected reports or All reports.");
-      }
+  setExportModalOpen(false);
 
-      const count =
-        exportMode === "listed"
-          ? stats.shown
-          : exportMode === "selectedOne" || exportMode === "selectedSplit"
-            ? stats.selectedCount
-            : Math.max(stats.shown, 1);
+  try {
+    if (exportFormat === "gpx") {
+      const base = sanitizeFileBaseName(exportName || projectName);
+      const fileName = `${base}.gpx`;
 
-      const est = estimateSeconds(exportMode, count, includePhotos);
-      startDlUI("Preparing DOCX export…", est);
-
-      const wm = watermarkOpts.enabled ? watermarkOpts : { enabled: false, text: "" };
+      const countForEst =
+        exportMode === "selectedOne" ? stats.selectedCount : Math.max(stats.shown, 1);
+      const est = estimateSeconds(exportMode, countForEst, false);
+      startDlUI("Preparing GPX export…", est);
 
       if (exportMode === "all") {
-        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-ALL-REPORTS`)}.docx`;
-        const { blob } = await generateProjectDOCX(supabase, projectId, {
-          includePhotos,
+        const { blob, fileName: fn } = await generateProjectGPX(supabase, projectId, {
+          name: exportName || projectName,
           fileName,
-          watermark: wm as any,
         });
-        setPreparedFiles([{ fileName, blob }]);
-        setDlDone(true);
-        return;
-      }
-
-      if (exportMode === "listed") {
-        const ids = filteredSortedReports.map((r) => r.id);
-        if (!ids.length) throw new Error("No reports available to export.");
-
-        const fileName = `${sanitizeFileBaseName(
-          exportName || `${projectName}-${vmFilterLabel(vmFilter)}-${ids.length}`
-        )}.docx`;
-
-        const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, ids, {
-          includePhotos,
-          fileName,
-          watermark: wm as any,
-        });
-
-        setPreparedFiles([{ fileName, blob }]);
+        setPreparedFiles([{ fileName: fn, blob }]);
         setDlDone(true);
         return;
       }
 
       if (exportMode === "selectedOne") {
         const ids = selectedIdsInOrder;
-        const fileName = `${sanitizeFileBaseName(exportName || `${projectName}-SELECTED-${ids.length}`)}.docx`;
-
-        const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, ids, {
-          includePhotos,
-          fileName,
-          watermark: wm as any,
-        });
-
-        setPreparedFiles([{ fileName, blob }]);
+        const { blob, fileName: fn } = await generateProjectGPXByReportIds(
+          supabase,
+          projectId,
+          ids,
+          {
+            name: exportName || projectName,
+            fileName,
+          }
+        );
+        setPreparedFiles([{ fileName: fn, blob }]);
         setDlDone(true);
         return;
       }
 
-      if (exportMode === "selectedSplit") {
-        const ids = selectedIdsInOrder;
-        const stages = parseStageRanges(stageRanges, ids.length);
-
-        if (!stages.length) {
-          throw new Error(`Invalid stage ranges.\nExample: "1-12,13-14,15-25"\nTotal selected: ${ids.length}`);
-        }
-
-        const base = sanitizeFileBaseName(exportName || projectName);
-        const files: PreparedFile[] = [];
-
-        for (const st of stages) {
-          const subset = ids.slice(st.from - 1, st.to);
-          if (!subset.length) continue;
-
-          const fileName = `${base}-${st.label}.docx`;
-          const { blob } = await generateProjectDOCXByReportIds(supabase, projectId, subset, {
-            includePhotos,
-            fileName,
-            watermark: wm as any,
-          });
-
-          files.push({ fileName, blob });
-        }
-
-        if (!files.length) throw new Error("No stage files generated (check your stage ranges).");
-
-        setPreparedFiles(files);
-        setDlDone(true);
-      }
-    } catch (e: any) {
-      setDlError(e?.message || String(e));
-      setDlDone(true);
+      throw new Error("GPX supports only: Selected reports or All reports.");
     }
-  };
+
+    const count =
+      exportMode === "listed"
+        ? stats.shown
+        : exportMode === "selectedOne" || exportMode === "selectedSplit"
+          ? stats.selectedCount
+          : Math.max(stats.shown, 1);
+
+    const est = estimateSeconds(exportMode, count, includePhotos);
+    startDlUI("Preparing DOCX export…", est);
+
+    const wm = watermarkOpts.enabled ? watermarkOpts : { enabled: false, text: "" };
+
+    if (exportMode === "all") {
+      const ids = filteredSortedReports.map((r) => r.id);
+      if (!ids.length) throw new Error("No reports available to export.");
+
+      const fileName = `${sanitizeFileBaseName(
+        exportName || `${projectName}-ALL-REPORTS`
+      )}.docx`;
+
+      const { blob } = await exportDocxViaApi({
+        projectId,
+        reportIds: ids,
+        fileName,
+        includePhotos,
+        watermark: wm as any,
+      });
+
+      setPreparedFiles([{ fileName, blob }]);
+      setDlDone(true);
+      return;
+    }
+
+    if (exportMode === "listed") {
+      const ids = filteredSortedReports.map((r) => r.id);
+      if (!ids.length) throw new Error("No reports available to export.");
+
+      const fileName = `${sanitizeFileBaseName(
+        exportName || `${projectName}-${vmFilterLabel(vmFilter)}-${ids.length}`
+      )}.docx`;
+
+      const { blob } = await exportDocxViaApi({
+        projectId,
+        reportIds: ids,
+        fileName,
+        includePhotos,
+        watermark: wm as any,
+      });
+
+      setPreparedFiles([{ fileName, blob }]);
+      setDlDone(true);
+      return;
+    }
+
+    if (exportMode === "selectedOne") {
+      const ids = selectedIdsInOrder;
+      if (!ids.length) throw new Error("Please select at least 1 report.");
+
+      const fileName = `${sanitizeFileBaseName(
+        exportName || `${projectName}-SELECTED-${ids.length}`
+      )}.docx`;
+
+      const { blob } = await exportDocxViaApi({
+        projectId,
+        reportIds: ids,
+        fileName,
+        includePhotos,
+        watermark: wm as any,
+      });
+
+      setPreparedFiles([{ fileName, blob }]);
+      setDlDone(true);
+      return;
+    }
+
+    if (exportMode === "selectedSplit") {
+      const ids = selectedIdsInOrder;
+      const stages = parseStageRanges(stageRanges, ids.length);
+
+      if (!stages.length) {
+        throw new Error(
+          `Invalid stage ranges.\nExample: "1-12,13-14,15-25"\nTotal selected: ${ids.length}`
+        );
+      }
+
+      const base = sanitizeFileBaseName(exportName || projectName);
+      const files: PreparedFile[] = [];
+
+      for (const st of stages) {
+        const subset = ids.slice(st.from - 1, st.to);
+        if (!subset.length) continue;
+
+        const fileName = `${base}-${st.label}.docx`;
+
+        const { blob } = await exportDocxViaApi({
+          projectId,
+          reportIds: subset,
+          fileName,
+          includePhotos,
+          watermark: wm as any,
+        });
+
+        files.push({ fileName, blob });
+      }
+
+      if (!files.length) {
+        throw new Error("No stage files generated (check your stage ranges).");
+      }
+
+      setPreparedFiles(files);
+      setDlDone(true);
+      return;
+    }
+  } catch (e: any) {
+    setDlError(e?.message || String(e));
+    setDlDone(true);
+  }
+};
 
   return (
     <div style={styles.containerFluid}>

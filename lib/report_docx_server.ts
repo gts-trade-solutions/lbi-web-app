@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * lib/download.ts (FULL FILE)
  *
@@ -12,8 +10,9 @@
  * ✅ Alignment kept clean (centered headers, consistent cell padding)
  */
 
-import { saveAs } from "file-saver";
 import JSZip from "jszip";
+import fs from "fs/promises";
+import path from "path";
 import {
   AlignmentType,
   BorderStyle,
@@ -42,6 +41,32 @@ import {
   VerticalPositionAlign,
   VerticalPositionRelativeFrom,
 } from "docx";
+
+
+function bytesFromBase64(b64: string): Uint8Array {
+  return new Uint8Array(Buffer.from(b64, "base64"));
+}
+
+async function readLocalPublicFileBytes(publicPath: string): Promise<Uint8Array | null> {
+  try {
+    const clean = String(publicPath || "").split("?")[0].split("#")[0];
+    const rel = clean.replace(/^\/+/, "");
+    const full = path.join(process.cwd(), "public", rel);
+    const buf = await fs.readFile(full);
+    return new Uint8Array(buf);
+  } catch {
+    return null;
+  }
+}
+
+function maybeAbsoluteUrl(u: string): string {
+  const raw = String(u || "").trim();
+  if (!raw) return raw;
+  if (/^https?:\/\//i.test(raw) || raw.startsWith("data:")) return raw;
+  const base = process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.SITE_URL || "";
+  if (base && raw.startsWith("/")) return `${base.replace(/\/+$/, "")}${raw}`;
+  return raw;
+}
 
 /** =========================
  * ✅ STYLE TOKENS (single source of truth)
@@ -91,7 +116,7 @@ const PG_BORDERS_XML =
 // ✅ Rounded input box background (PNG) to mimic border-radius in DOCX (Word table cells have no real borderRadius)
 const __ROUNDED_INPUT_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAA4QAAAB4CAYAAACq9jzEAAAEUUlEQVR4nO3dPVLrMBiG0XD3BBUUsHAooIJFQcXMnZDYkiXZjt9z2kxst898+jmdAAAAAAAAAAAAAAAAAIAjulvzZa/vn99rvg8AAOAWvTw9rNJqQ18iAAEAANqNCsQhDxWCAAAA/fUOw64PE4IAAADj9QrDLg8RggAAAOtrDcN/rR8gBgEAALbR2mNNNbnk5c+P9y2vBAAAOLS3j6/q/yydFC76U00ICkAAAIDlagKxNgyrg7A0BoUgAABAP6VhWBOFVUFYEoNCEAAAYJySMCyNwuZDZf4nBgEAAMbq2V3FQTg3HRSDAAAA65jrr9KtfkVjxKmHCUEAAIDtTC0hnVs6OjshdM8gAADAbZrruaY9hKaDAAAA22rpsskgtFQUAABg/6b6bKrrFk0IxSAAAMC+LOm0q0Fo7yAAAMAxXOu76gmh6SAAAMA+1fbaxSA0HQQAADiWS51XNSE0HQQAANi3mm5runYCAACA2yUIAQAAQv0JQvsHAQAAjum894onhPYPAgAA3IbSfrNkFAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUIIQAAAglCAEAAAIJQgBAABCCUIAAIBQghAAACCUIAQAAAglCAEAAEIJQgAAgFCCEAAAIJQgBAAACCUIAQAAQglCAACAUMVB+PbxNfI7AAAA6KS03/4E4cvTw133rwEAAGBz571nySgAAEAoQQgAABCqKgjtIwQAANi3mm67GIT2EQIAABzLpc6rXjJqSggAALBPtb12NQhNCQEAAI7hWt8tOlTGlBAAAGBflnTaZBBOTQlFIQAAwD5M9dlU1zVdOyEKAQAAttXSZbNBaC8hAADAbZrrueLYe33//J76/fnxvvRRAAAANJqbDJYM94qXjM49zPJRAACAdfSIwdOpcQ/hOVEIAAAwVs/uqt4fOLd09JclpAAAAP2UhmDNOTCLDowpjcLTSRgCAAC0qJkI1h4K2nSCaE0Y/hKIAAAA1y1ZErr0dojmKyWWRCEAAAB9tFwV2HyojHsKAQAAttHaY11jzrQQAABgvF6DuSHTPWEIAADQX+8VmkOXewpDAACAdqO26q26/08gAgAAzHNWCwAAAAAAAAAAAACd/ADtkM/Q/w16FgAAAABJRU5ErkJggg==";
 function __roundedInputPngBytes() {
-  return Uint8Array.from(atob(__ROUNDED_INPUT_PNG_BASE64), (c) => c.charCodeAt(0));
+  return bytesFromBase64(__ROUNDED_INPUT_PNG_BASE64);
 }
 
 
@@ -249,15 +274,79 @@ function formatOsmAddress(addr: any) {
 }
 
 async function fetchWithTimeout(url: string, ms: number) {
-  // Disabled for client-side DOCX export to avoid browser CORS/network failures.
-  // Kept only for compatibility; returns a rejected promise if called accidentally.
-  throw new Error("Reverse geocoding disabled in client export");
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "race-innovations-docx-export/1.0",
+        "Accept-Language": "en",
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`Reverse geocode failed: ${res.status}`);
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
-  // Browser export should not call external reverse-geocoding APIs.
-  // Use stored location when available; otherwise fall back to coordinates.
-  return "";
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "";
+
+  const key = coordKey(lat, lon);
+  if (REVERSE_CACHE.has(key)) return REVERSE_CACHE.get(key) || "";
+  if (REVERSE_INFLIGHT.has(key)) return REVERSE_INFLIGHT.get(key)!;
+
+  const work = (async () => {
+    try {
+      const url =
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+        `&zoom=18&addressdetails=1&namedetails=1` +
+        `&lat=${encodeURIComponent(String(lat))}` +
+        `&lon=${encodeURIComponent(String(lon))}`;
+
+      const res = await fetchWithTimeout(url, REVERSE_TIMEOUT_MS);
+      const json: any = await res.json().catch(() => null);
+      const addr = json?.address || null;
+
+      const exact = compactUniqueParts([
+        pickFirst(addr, [
+          "house_number",
+          "house_name",
+          "building",
+          "amenity",
+          "shop",
+          "office",
+          "tourism",
+          "industrial",
+          "commercial",
+          "man_made",
+          "railway",
+          "bridge",
+        ]),
+        pickFirst(addr, ["road", "pedestrian", "service", "residential", "footway", "path", "cycleway"]),
+        pickFirst(addr, ["neighbourhood", "suburb", "quarter", "hamlet", "locality"]),
+        pickFirst(addr, ["city_district", "district", "borough", "county", "state_district"]),
+        pickFirst(addr, ["city", "town", "village", "municipality"]),
+        pickFirst(addr, ["state"]),
+      ]).join(", ");
+
+      const fallback = formatOsmAddress(addr || {}) || String(json?.display_name || "").trim();
+      const value = (exact || fallback || "").trim();
+      REVERSE_CACHE.set(key, value);
+      return value;
+    } catch {
+      REVERSE_CACHE.set(key, "");
+      return "";
+    } finally {
+      REVERSE_INFLIGHT.delete(key);
+    }
+  })();
+
+  REVERSE_INFLIGHT.set(key, work);
+  return work;
 }
 
 /** =========================
@@ -716,72 +805,7 @@ function centeredImageFit(bytes: Uint8Array, maxW: number, maxH: number) {
 const __TRIM_CACHE = new Map<string, Uint8Array>();
 
 async function trimWhiteMarginsToPng(bytes: Uint8Array): Promise<Uint8Array> {
-  try {
-    const key = `${bytes.length}:${bytes[0]}:${bytes[1]}:${bytes[2]}:${bytes[3]}`;
-    const cached = __TRIM_CACHE.get(key);
-    if (cached) return cached;
-
-    const blob = new Blob([bytes]);
-    const bmp = await createImageBitmap(blob);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = bmp.width;
-    canvas.height = bmp.height;
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(bmp, 0, 0);
-
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = img.data;
-
-    // find bbox of "non-white" pixels
-    let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1;
-
-    const isNonWhite = (r: number, g: number, b: number, a: number) => {
-      if (a < 10) return false; // transparent
-      // treat near-white as background
-      return !(r > 245 && g > 245 && b > 245);
-    };
-
-    for (let y = 0; y < canvas.height; y++) {
-      const row = y * canvas.width * 4;
-      for (let x = 0; x < canvas.width; x++) {
-        const i = row + x * 4;
-        const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-        if (isNonWhite(r, g, b, a)) {
-          if (x < minX) minX = x;
-          if (y < minY) minY = y;
-          if (x > maxX) maxX = x;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-
-    // If nothing found, return original
-    if (maxX < 0 || maxY < 0) return bytes;
-
-    // Add small padding so lines aren't clipped
-    const pad = 8;
-    minX = Math.max(0, minX - pad);
-    minY = Math.max(0, minY - pad);
-    maxX = Math.min(canvas.width - 1, maxX + pad);
-    maxY = Math.min(canvas.height - 1, maxY + pad);
-
-    const w = Math.max(1, maxX - minX + 1);
-    const h = Math.max(1, maxY - minY + 1);
-
-    const crop = document.createElement("canvas");
-    crop.width = w;
-    crop.height = h;
-    const c2 = crop.getContext("2d")!;
-    c2.drawImage(canvas, minX, minY, w, h, 0, 0, w, h);
-
-    const pngBlob: Blob = await new Promise((resolve) => crop.toBlob((b) => resolve(b as Blob), "image/png"));
-    const outBytes = new Uint8Array(await pngBlob.arrayBuffer());
-    __TRIM_CACHE.set(key, outBytes);
-    return outBytes;
-  } catch {
-    return bytes;
-  }
+  return bytes;
 }
 
 async function centeredImageFitTrim(bytes: Uint8Array, maxW: number, maxH: number) {
@@ -818,8 +842,9 @@ function sectionPropsA4Portrait() {
 async function bytesFromUrlForDocx(url: string): Promise<Uint8Array | null> {
   const u = String(url || "").trim();
   if (!u) return null;
+  if (u.startsWith("/")) return await readLocalPublicFileBytes(u);
   try {
-    return await fetchBytes(u);
+    return await fetchBytes(maybeAbsoluteUrl(u));
   } catch {
     return null;
   }
@@ -1311,9 +1336,7 @@ function buildIconCandidateUrls(src: string): string[] {
   if (!raw) return [];
 
   const base =
-    typeof window !== "undefined" && raw.startsWith("/")
-      ? `${window.location.origin}${raw}`
-      : raw;
+    maybeAbsoluteUrl(raw)
 
   if (/\.(png|jpg|jpeg)$/i.test(base)) return [base];
 
@@ -1393,353 +1416,14 @@ function detectDetailKind(details: string) {
 }
 
 async function iconPngBytes(kind: string, sizePx = 34): Promise<Uint8Array | null> {
-  const key = `${kind}:${sizePx}`;
-  if (DETAILS_ICON_CACHE.has(key)) return DETAILS_ICON_CACHE.get(key)!;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = sizePx;
-  canvas.height = sizePx;
-  const ctx = canvas.getContext("2d")!;
-  ctx.clearRect(0, 0, sizePx, sizePx);
-
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "#111111";
-  ctx.fillStyle = "#111111";
-
-  const S = sizePx;
-  const pad = Math.max(3, Math.round(S * 0.12));
-  const mid = S / 2;
-
-  // ✅ helper used by drawBridge()
-  function rect(x: number, y: number, w: number, h: number, fill = true) {
-    if (fill) ctx.fillRect(x, y, w, h);
-    else ctx.strokeRect(x, y, w, h);
-  }
-
-  function drawArrow(dir: "left" | "right") {
-    ctx.lineWidth = Math.max(3, Math.round(S * 0.12));
-    ctx.beginPath();
-    if (dir === "right") {
-      ctx.moveTo(pad, mid);
-      ctx.lineTo(S - pad * 1.6, mid);
-    } else {
-      ctx.moveTo(S - pad, mid);
-      ctx.lineTo(pad * 1.6, mid);
-    }
-    ctx.stroke();
-
-    ctx.beginPath();
-    if (dir === "right") {
-      ctx.moveTo(S - pad * 1.8, mid - pad);
-      ctx.lineTo(S - pad * 1.0, mid);
-      ctx.lineTo(S - pad * 1.8, mid + pad);
-    } else {
-      ctx.moveTo(pad * 1.8, mid - pad);
-      ctx.lineTo(pad * 1.0, mid);
-      ctx.lineTo(pad * 1.8, mid + pad);
-    }
-    ctx.stroke();
-  }
-
-  // ✅ Footpath Bridge icon (deck + supports) — used only for "footpath_bridge"
-  
-  function drawBridge() {
-    // Simple arch bridge icon (separate from footpath bridge)
-    const deckY = pad + Math.round(S * 0.46);
-    const deckH = Math.max(3, Math.round(S * 0.10));
-    rect(pad + Math.round(S * 0.10), deckY, S - Math.round(S * 0.20), deckH, true);
-
-    const archTop = deckY - Math.round(S * 0.18);
-    const left = pad + Math.round(S * 0.16);
-    const right = pad + S - Math.round(S * 0.16);
-    rect(left, archTop, right - left, Math.max(2, Math.round(S * 0.06)), true);
-
-    const legW = Math.max(2, Math.round(S * 0.06));
-    const legH = Math.max(6, Math.round(S * 0.22));
-    const legY = deckY + deckH;
-    rect(pad + Math.round(S * 0.22), legY, legW, legH, true);
-    rect(pad + Math.round(S * 0.72), legY, legW, legH, true);
-  }
-
-
-  function drawFootpathBridge() {
-    // Deck
-    const deckY = pad + Math.round(S * 0.28);
-    const deckH = Math.max(3, Math.round(S * 0.14));
-    ctx.fillRect(pad, deckY, S - pad * 2, deckH);
-
-    // Rail (thin top line)
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.05));
-    ctx.beginPath();
-    ctx.moveTo(pad, deckY);
-    ctx.lineTo(S - pad, deckY);
-    ctx.stroke();
-
-    // Supports / legs
-    const legTop = deckY + deckH;
-    const legBottom = S - pad;
-    const legs = 5;
-    for (let k = 0; k < legs; k++) {
-      const x = pad + Math.round(((S - pad * 2) * k) / (legs - 1));
-      ctx.beginPath();
-      ctx.moveTo(x, legTop);
-      ctx.lineTo(x, legBottom);
-      ctx.stroke();
-    }
-
-    // Ground line
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.05));
-    ctx.beginPath();
-    ctx.moveTo(pad, legBottom);
-    ctx.lineTo(S - pad, legBottom);
-    ctx.stroke();
-  }
-
-
-  function drawUnderpass() {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.10));
-    ctx.beginPath();
-    ctx.moveTo(pad, S - pad);
-    ctx.lineTo(S - pad, S - pad);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(mid, S - pad, S * 0.28, Math.PI, 0, false);
-    ctx.stroke();
-  }
-
-  function drawCable(label: string) {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.10));
-    ctx.beginPath();
-    ctx.moveTo(pad, S * 0.35);
-    ctx.quadraticCurveTo(mid, S * 0.12, S - pad, S * 0.35);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(pad, S * 0.35, Math.max(2, Math.round(S * 0.06)), 0, Math.PI * 2);
-    ctx.arc(S - pad, S * 0.35, Math.max(2, Math.round(S * 0.06)), 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.font = `700 ${Math.round(S * 0.34)}px Arial`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(label, mid, S * 0.72);
-  }
-
-  function drawTower() {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
-    ctx.beginPath();
-    ctx.moveTo(mid, pad);
-    ctx.lineTo(S - pad, S - pad);
-    ctx.lineTo(pad, S - pad);
-    ctx.closePath();
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(pad * 1.6, S * 0.62);
-    ctx.lineTo(S - pad * 1.6, S * 0.62);
-    ctx.moveTo(pad * 2.3, S * 0.78);
-    ctx.lineTo(S - pad * 2.3, S * 0.78);
-    ctx.stroke();
-  }
-
-  function drawDiversion() {
-    ctx.lineWidth = Math.max(3, Math.round(S * 0.10));
-    ctx.beginPath();
-    ctx.moveTo(mid, S - pad);
-    ctx.lineTo(mid, pad * 1.8);
-    ctx.lineTo(S - pad * 1.6, pad * 1.8);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(S - pad * 1.8, pad * 1.8 - pad);
-    ctx.lineTo(S - pad * 1.0, pad * 1.8);
-    ctx.lineTo(S - pad * 1.8, pad * 1.8 + pad);
-    ctx.stroke();
-  }
-
-  function drawTree() {
-    ctx.fillRect(mid - Math.round(S * 0.06), Math.round(S * 0.45), Math.round(S * 0.12), Math.round(S * 0.40));
-    ctx.beginPath();
-    ctx.arc(mid, Math.round(S * 0.35), Math.round(S * 0.22), 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(mid - Math.round(S * 0.16), Math.round(S * 0.40), Math.round(S * 0.16), 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(mid + Math.round(S * 0.16), Math.round(S * 0.40), Math.round(S * 0.16), 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  function drawPetrol() {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
-    const x = pad * 1.2;
-    const y = pad * 1.6;
-    const w = Math.round(S * 0.45);
-    const h = Math.round(S * 0.65);
-    ctx.strokeRect(x, y, w, h);
-    ctx.beginPath();
-    ctx.moveTo(x + w, y + Math.round(h * 0.25));
-    ctx.lineTo(x + w + Math.round(S * 0.18), y + Math.round(h * 0.18));
-    ctx.lineTo(x + w + Math.round(S * 0.22), y + Math.round(h * 0.32));
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x + w + Math.round(S * 0.18), y + Math.round(h * 0.18));
-    ctx.quadraticCurveTo(S - pad, mid, S - pad * 1.2, S - pad * 1.2);
-    ctx.stroke();
-  }
-
-  function drawSign(isElectric: boolean) {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
-    ctx.beginPath();
-    ctx.moveTo(mid, Math.round(S * 0.35));
-    ctx.lineTo(mid, S - pad);
-    ctx.stroke();
-    const bw = Math.round(S * 0.60);
-    const bh = Math.round(S * 0.30);
-    const bx = mid - bw / 2;
-    const by = pad;
-    ctx.strokeRect(bx, by, bw, bh);
-    if (isElectric) {
-      ctx.beginPath();
-      ctx.moveTo(mid - 4, by + 6);
-      ctx.lineTo(mid + 2, by + 14);
-      ctx.lineTo(mid - 2, by + 14);
-      ctx.lineTo(mid + 4, by + 24);
-      ctx.stroke();
-    }
-  }
-
-  function drawCameraPole() {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
-    ctx.beginPath();
-    ctx.moveTo(mid, pad);
-    ctx.lineTo(mid, S - pad);
-    ctx.stroke();
-    const cw = Math.round(S * 0.35);
-    const ch = Math.round(S * 0.20);
-    ctx.strokeRect(mid, Math.round(S * 0.22), cw, ch);
-    ctx.beginPath();
-    ctx.arc(mid + Math.round(cw * 0.75), Math.round(S * 0.32), Math.round(S * 0.05), 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  function drawToll() {
-    ctx.lineWidth = Math.max(2, Math.round(S * 0.08));
-    ctx.fillRect(pad, pad, S - pad * 2, Math.round(S * 0.18));
-    const by = pad + Math.round(S * 0.22);
-    const bw = Math.round(S * 0.22);
-    const gap = Math.round(S * 0.06);
-    for (let i = 0; i < 3; i++) {
-      const bx = pad + i * (bw + gap);
-      ctx.strokeRect(bx, by, bw, Math.round(S * 0.55));
-    }
-  }
-
-  function drawBend() {
-    ctx.lineWidth = Math.max(3, Math.round(S * 0.12));
-    ctx.beginPath();
-    ctx.moveTo(pad * 1.6, S - pad * 1.6);
-    ctx.quadraticCurveTo(mid, mid, S - pad * 1.6, pad * 1.6);
-    ctx.stroke();
-  }
-
-  switch (kind) {
-    case "footpath_bridge":
-      drawFootpathBridge();
-      break;
-    case "bridge":
-      drawBridge();
-      break;
-    case "underpass":
-      drawUnderpass();
-      break;
-    case "lt_cable":
-      drawCable("LT");
-      break;
-    case "ht_cable":
-      drawCable("HT");
-      break;
-    case "towerline_cable":
-      drawCable("TL");
-      break;
-    case "towerline":
-      drawTower();
-      break;
-    case "diversion":
-      drawDiversion();
-      break;
-    case "junction_left":
-      drawArrow("left");
-      break;
-    case "junction_right":
-      drawArrow("right");
-      break;
-    case "bend":
-      drawBend();
-      break;
-    case "tree":
-      drawTree();
-      break;
-    case "petrol":
-      drawPetrol();
-      break;
-    case "signboard":
-      drawSign(false);
-      break;
-    case "electric_sign":
-      drawSign(true);
-      break;
-    case "camera_pole":
-      drawCameraPole();
-      break;
-    case "toll":
-      drawToll();
-      break;
-    default:
-      return null;
-  }
-
-  ctx.restore();
-
-  const base64 = canvas.toDataURL("image/png").split(",")[1];
-  const bin = atob(base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-  DETAILS_ICON_CACHE.set(key, bytes);
-  return bytes;
+  return null;
 }
 
 /** =========================
  * ✅ Watermark (diagonal)
  * ========================= */
 async function watermarkPngBytesDiagonal(text: string) {
-  const W = 1600;
-  const H = 900;
-  const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d")!;
-  ctx.clearRect(0, 0, W, H);
-
-  ctx.save();
-  ctx.translate(W / 2, H / 2);
-  ctx.rotate((-30 * Math.PI) / 180);
-
-  ctx.font = "700 160px Arial";
-  ctx.fillStyle = "rgba(120,120,120,0.12)";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text || "CONFIDENTIAL", 0, 0);
-  ctx.restore();
-
-  const base64 = canvas.toDataURL("image/png").split(",")[1];
-  const bin = atob(base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
+  return new Uint8Array();
 }
 
 async function buildHeaderWithDiagonalWatermark() {
@@ -1888,7 +1572,7 @@ async function coverLogoOnly(logoUrl?: string, w = 390, h = 68) {
   ].filter(Boolean) as string[];
 
   const toAbs = (u0: string) =>
-    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+    maybeAbsoluteUrl(u0);
 
   let bytes: Uint8Array | null = null;
   for (const c of candidates) {
@@ -1911,7 +1595,7 @@ async function buildLogoOnlyHeader(logoUrl?: string, w = 330, h = 58) {
   const raw = String(logoUrl || "").trim();
   const candidates = [raw, raw || "/images/logo_v2.png", raw || "/logo_v2.png"].filter(Boolean) as string[];
   const toAbs = (u0: string) =>
-    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+    maybeAbsoluteUrl(u0);
 
   let bytes: Uint8Array | null = null;
   for (const c of candidates) {
@@ -1944,7 +1628,7 @@ async function buildGATitleHeader(params: {
   const raw = String(logoUrl || "").trim();
   const candidates = [raw, raw || "/images/logo_v2.png", raw || "/logo_v2.png"].filter(Boolean) as string[];
   const toAbs = (u0: string) =>
-    typeof window !== "undefined" && u0.startsWith("/") ? `${window.location.origin}${u0}` : u0;
+    maybeAbsoluteUrl(u0);
 
   let bytes: Uint8Array | null = null;
   for (const c of candidates) {
@@ -2187,50 +1871,26 @@ async function detailsCellWithIcon(detailsText: string, span: number, vAlign: Ve
  * VEHICLE MOVEMENT square
  * ========================= */
 async function squarePngBytes(colorHex: string, sizePx = 26): Promise<Uint8Array> {
-  const canvas = document.createElement("canvas");
-  canvas.width = sizePx;
-  canvas.height = sizePx;
-
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = colorHex;
-  ctx.fillRect(0, 0, sizePx, sizePx);
-
-  ctx.strokeStyle = "#111111";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(1, 1, sizePx - 2, sizePx - 2);
-
-  const base64 = canvas.toDataURL("image/png").split(",")[1];
-  const bin = atob(base64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
+  return new Uint8Array();
 }
 
 const MOVEMENT_SQUARE_CACHE = new Map<string, Uint8Array>();
 
 async function movementCell(movement: string) {
   const m = normalizeMovement(movement);
-  const color =
-    m === "red" ? "#FF0000" : m === "yellow" ? "#FFC000" : m === "green" ? "#00B050" : "#FFFFFF";
-
-  const box = 24;
-  const key = `${color}:${box}`;
-
-  let bytes = MOVEMENT_SQUARE_CACHE.get(key);
-  if (!bytes) {
-    bytes = await squarePngBytes(color, box);
-    MOVEMENT_SQUARE_CACHE.set(key, bytes);
-  }
+  const fill = m === "red" ? "FF0000" : m === "yellow" ? "FFC000" : m === "green" ? "00B050" : "FFFFFF";
+  const label = m ? m.toUpperCase() : "";
 
   return new TableCell({
     verticalAlign: VerticalAlign.CENTER,
     borders: CELL_BORDERS,
+    shading: { type: ShadingType.CLEAR, fill },
     margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: STYLE.spacing.none,
-        children: [new ImageRun({ data: bytes, transformation: { width: box, height: box } })],
+        children: [new TextRun({ text: label, size: 20, bold: true, color: "111111" })],
       }),
     ],
   });
@@ -2343,48 +2003,7 @@ async function optimizeImageBytesForDocx(
   bytes: Uint8Array,
   opts: { maxWidth: number; maxHeight: number; quality?: number }
 ): Promise<Uint8Array> {
-  try {
-    if (typeof window === "undefined") return bytes;
-
-    const blob = new Blob([bytes]);
-    const bmp = await createImageBitmap(blob);
-
-    const srcW = Math.max(1, bmp.width);
-    const srcH = Math.max(1, bmp.height);
-    const scale = Math.min(1, opts.maxWidth / srcW, opts.maxHeight / srcH);
-
-    // if already small enough, avoid unnecessary recompression
-    if (scale >= 0.98 && bytes.length <= 450 * 1024) {
-      return bytes;
-    }
-
-    const outW = Math.max(1, Math.round(srcW * scale));
-    const outH = Math.max(1, Math.round(srcH * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = outW;
-    canvas.height = outH;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return bytes;
-
-    // white background so JPEG export remains clean
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, outW, outH);
-    ctx.drawImage(bmp, 0, 0, outW, outH);
-
-    const outBlob: Blob = await new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("Failed to optimize image for DOCX."))),
-        "image/jpeg",
-        opts.quality ?? 0.76
-      );
-    });
-
-    const outBytes = new Uint8Array(await outBlob.arrayBuffer());
-    return outBytes.length > 0 ? outBytes : bytes;
-  } catch {
-    return bytes;
-  }
+  return bytes;
 }
 
 async function resolvePhotoBytesForDocx(
@@ -2461,16 +2080,7 @@ async function getBucketNamesOnce(supabase: any): Promise<string[]> {
 
 async function blobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
   try {
-    const bmp = await createImageBitmap(blob);
-    const canvas = document.createElement("canvas");
-    canvas.width = bmp.width;
-    canvas.height = bmp.height;
-
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(bmp, 0, 0);
-
-    const pngBlob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b as Blob), "image/png"));
-    return new Uint8Array(await pngBlob.arrayBuffer());
+    return new Uint8Array(await blob.arrayBuffer());
   } catch {
     return null;
   }
@@ -2479,49 +2089,11 @@ async function blobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
 const PDF_JS_PROMISE_KEY = "__docxPdfJsPromise";
 
 async function getPdfJsForDocx() {
-  if (typeof window === "undefined") throw new Error("PDF conversion works only in browser.");
-  const win = window as any;
-  if (!win[PDF_JS_PROMISE_KEY]) {
-    win[PDF_JS_PROMISE_KEY] = (async () => {
-      const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc =
-          `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/legacy/build/pdf.worker.min.mjs`;
-      }
-      return pdfjsLib;
-    })();
-  }
-  return win[PDF_JS_PROMISE_KEY];
+  return null as any;
 }
 
 async function pdfBlobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
-  try {
-    const pdfjsLib = await getPdfJsForDocx();
-    const buffer = await blob.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-    const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 2 });
-
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-
-    canvas.width = Math.ceil(viewport.width);
-    canvas.height = Math.ceil(viewport.height);
-
-    await page.render({ canvasContext: context, viewport }).promise;
-
-    const pngBlob: Blob = await new Promise((resolve, reject) => {
-      canvas.toBlob((b) => {
-        if (b) resolve(b);
-        else reject(new Error("Failed to convert PDF page to PNG."));
-      }, "image/png");
-    });
-
-    return new Uint8Array(await pngBlob.arrayBuffer());
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
@@ -2529,7 +2101,9 @@ async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    const localBytes = url.startsWith("/") ? await readLocalPublicFileBytes(url) : null;
+    if (localBytes) return localBytes;
+    const res = await fetch(maybeAbsoluteUrl(url), { signal: controller.signal, cache: "no-store" });
     if (!res.ok) throw new Error(`Photo fetch failed: ${res.status}`);
 
     const blob = await res.blob();
@@ -4643,7 +4217,6 @@ async function buildDoc(opts: {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
 
-  if (opts.autoSave !== false) saveAs(blob, opts.fileName);
   return blob;
 }
 
@@ -4714,7 +4287,6 @@ export async function downloadProjectsCSV(
 
   const csv = header + "\n" + body;
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  saveAs(blob, fileName);
   return { blob, fileName };
 }
 
@@ -4957,4 +4529,26 @@ export async function generateProjectGPX(
     name,
     fileName: opts.fileName || `${String(name).slice(0, 80)}-ALL.gpx`,
   });
+}
+
+
+export async function generateProjectDOCXBuffer(
+  supabase: any,
+  projectId: string,
+  opts: DownloadOpts = {}
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const { blob, fileName } = await generateProjectDOCX(supabase, projectId, opts);
+  const buffer = Buffer.from(await blob.arrayBuffer());
+  return { buffer, fileName };
+}
+
+export async function generateProjectDOCXByReportIdsBuffer(
+  supabase: any,
+  projectId: string,
+  reportIds: string[],
+  opts: DownloadOpts = {}
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const { blob, fileName } = await generateProjectDOCXByReportIds(supabase, projectId, reportIds, opts);
+  const buffer = Buffer.from(await blob.arrayBuffer());
+  return { buffer, fileName };
 }

@@ -4,10 +4,14 @@ const nextConfig = {
     // Allows production builds to successfully complete even if ESLint errors are present.
     ignoreDuringBuilds: true,
   },
+  experimental: {
+    serverComponentsExternalPackages: ["@napi-rs/canvas"],
+  },
   typescript: {
     // Allows production builds to successfully complete even if TypeScript errors are present.
     ignoreBuildErrors: true,
   },
 };
+
 
 export default nextConfig;
