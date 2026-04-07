@@ -665,9 +665,21 @@ export default function ProjectsPage() {
   const load = async () => {
     setLoading(true);
     try {
+      const {
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
+
+      if (sessionErr) throw sessionErr;
+      if (!session?.user) {
+        redirectToLogin();
+        return;
+      }
+
       const { data, error } = await supabase
         .from("projects")
         .select("*")
+        .eq("user_id", session.user.id)
         .order("created_at", { ascending: false });
 
       if (error) throw error;
@@ -676,7 +688,11 @@ export default function ProjectsPage() {
       setProjects(rows);
       await hydrateLastModifiedNames(rows);
 
-      if (!bulkProjectId && rows.length) setBulkProjectId(rows[0].id);
+      if (!rows.length) {
+        setBulkProjectId("");
+      } else if (!bulkProjectId || !rows.some((r) => r.id === bulkProjectId)) {
+        setBulkProjectId(rows[0].id);
+      }
     } catch (e: any) {
       const msg = String(e?.message || e || "").toLowerCase();
       if (msg.includes("auth") || msg.includes("session") || msg.includes("jwt")) {

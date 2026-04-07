@@ -11,6 +11,7 @@
  */
 
 import JSZip from "jszip";
+import sharp from "sharp";
 import fs from "fs/promises";
 import path from "path";
 import {
@@ -274,79 +275,15 @@ function formatOsmAddress(addr: any) {
 }
 
 async function fetchWithTimeout(url: string, ms: number) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "race-innovations-docx-export/1.0",
-        "Accept-Language": "en",
-      },
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error(`Reverse geocode failed: ${res.status}`);
-    return res;
-  } finally {
-    clearTimeout(t);
-  }
+  // Disabled for client-side DOCX export to avoid browser CORS/network failures.
+  // Kept only for compatibility; returns a rejected promise if called accidentally.
+  throw new Error("Reverse geocoding disabled in client export");
 }
 
 async function reverseGeocodeOSM(lat: number, lon: number): Promise<string> {
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "";
-
-  const key = coordKey(lat, lon);
-  if (REVERSE_CACHE.has(key)) return REVERSE_CACHE.get(key) || "";
-  if (REVERSE_INFLIGHT.has(key)) return REVERSE_INFLIGHT.get(key)!;
-
-  const work = (async () => {
-    try {
-      const url =
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
-        `&zoom=18&addressdetails=1&namedetails=1` +
-        `&lat=${encodeURIComponent(String(lat))}` +
-        `&lon=${encodeURIComponent(String(lon))}`;
-
-      const res = await fetchWithTimeout(url, REVERSE_TIMEOUT_MS);
-      const json: any = await res.json().catch(() => null);
-      const addr = json?.address || null;
-
-      const exact = compactUniqueParts([
-        pickFirst(addr, [
-          "house_number",
-          "house_name",
-          "building",
-          "amenity",
-          "shop",
-          "office",
-          "tourism",
-          "industrial",
-          "commercial",
-          "man_made",
-          "railway",
-          "bridge",
-        ]),
-        pickFirst(addr, ["road", "pedestrian", "service", "residential", "footway", "path", "cycleway"]),
-        pickFirst(addr, ["neighbourhood", "suburb", "quarter", "hamlet", "locality"]),
-        pickFirst(addr, ["city_district", "district", "borough", "county", "state_district"]),
-        pickFirst(addr, ["city", "town", "village", "municipality"]),
-        pickFirst(addr, ["state"]),
-      ]).join(", ");
-
-      const fallback = formatOsmAddress(addr || {}) || String(json?.display_name || "").trim();
-      const value = (exact || fallback || "").trim();
-      REVERSE_CACHE.set(key, value);
-      return value;
-    } catch {
-      REVERSE_CACHE.set(key, "");
-      return "";
-    } finally {
-      REVERSE_INFLIGHT.delete(key);
-    }
-  })();
-
-  REVERSE_INFLIGHT.set(key, work);
-  return work;
+  // Browser export should not call external reverse-geocoding APIs.
+  // Use stored location when available; otherwise fall back to coordinates.
+  return "";
 }
 
 /** =========================
@@ -805,7 +742,18 @@ function centeredImageFit(bytes: Uint8Array, maxW: number, maxH: number) {
 const __TRIM_CACHE = new Map<string, Uint8Array>();
 
 async function trimWhiteMarginsToPng(bytes: Uint8Array): Promise<Uint8Array> {
-  return bytes;
+  try {
+    const key = `${bytes.length}:${bytes[0]}:${bytes[1]}:${bytes[2]}:${bytes[3]}`;
+    const cached = __TRIM_CACHE.get(key);
+    if (cached) return cached;
+
+    const out = await sharp(Buffer.from(bytes)).trim().png().toBuffer();
+    const outBytes = new Uint8Array(out);
+    __TRIM_CACHE.set(key, outBytes);
+    return outBytes;
+  } catch {
+    return bytes;
+  }
 }
 
 async function centeredImageFitTrim(bytes: Uint8Array, maxW: number, maxH: number) {
@@ -1416,14 +1364,30 @@ function detectDetailKind(details: string) {
 }
 
 async function iconPngBytes(kind: string, sizePx = 34): Promise<Uint8Array | null> {
-  return null;
+  const key = `${kind}:${sizePx}`;
+  if (DETAILS_ICON_CACHE.has(key)) return DETAILS_ICON_CACHE.get(key)!;
+  try {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${sizePx}" height="${sizePx}" viewBox="0 0 ${sizePx} ${sizePx}"><rect x="2" y="2" width="${sizePx-4}" height="${sizePx-4}" rx="4" ry="4" fill="white" stroke="#111" stroke-width="2"/><text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle" font-family="Arial" font-size="${Math.max(9, Math.floor(sizePx*0.24))}" font-weight="700" fill="#111">${String(kind || "OBS").replace(/[^A-Za-z]/g, "").slice(0,4).toUpperCase() || "OBS"}</text></svg>`;
+    const out = await sharp(Buffer.from(svg)).png().toBuffer();
+    const bytes = new Uint8Array(out);
+    DETAILS_ICON_CACHE.set(key, bytes);
+    return bytes;
+  } catch {
+    return null;
+  }
 }
 
 /** =========================
  * ✅ Watermark (diagonal)
  * ========================= */
 async function watermarkPngBytesDiagonal(text: string) {
-  return new Uint8Array();
+  try {
+    const safe = String(text || "CONFIDENTIAL").replace(/[<&>]/g, " ");
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><g transform="translate(800,450) rotate(-30)"><text x="0" y="0" text-anchor="middle" dominant-baseline="middle" font-family="Arial" font-size="160" font-weight="700" fill="rgba(120,120,120,0.12)">${safe}</text></g></svg>`;
+    return new Uint8Array(await sharp(Buffer.from(svg)).png().toBuffer());
+  } catch {
+    return new Uint8Array();
+  }
 }
 
 async function buildHeaderWithDiagonalWatermark() {
@@ -1871,26 +1835,35 @@ async function detailsCellWithIcon(detailsText: string, span: number, vAlign: Ve
  * VEHICLE MOVEMENT square
  * ========================= */
 async function squarePngBytes(colorHex: string, sizePx = 26): Promise<Uint8Array> {
-  return new Uint8Array();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${sizePx}" height="${sizePx}"><rect x="1" y="1" width="${sizePx-2}" height="${sizePx-2}" fill="${colorHex}" stroke="#111" stroke-width="2"/></svg>`;
+  return new Uint8Array(await sharp(Buffer.from(svg)).png().toBuffer());
 }
 
 const MOVEMENT_SQUARE_CACHE = new Map<string, Uint8Array>();
 
 async function movementCell(movement: string) {
   const m = normalizeMovement(movement);
-  const fill = m === "red" ? "FF0000" : m === "yellow" ? "FFC000" : m === "green" ? "00B050" : "FFFFFF";
-  const label = m ? m.toUpperCase() : "";
+  const color =
+    m === "red" ? "#FF0000" : m === "yellow" ? "#FFC000" : m === "green" ? "#00B050" : "#FFFFFF";
+
+  const box = 24;
+  const key = `${color}:${box}`;
+
+  let bytes = MOVEMENT_SQUARE_CACHE.get(key);
+  if (!bytes) {
+    bytes = await squarePngBytes(color, box);
+    MOVEMENT_SQUARE_CACHE.set(key, bytes);
+  }
 
   return new TableCell({
     verticalAlign: VerticalAlign.CENTER,
     borders: CELL_BORDERS,
-    shading: { type: ShadingType.CLEAR, fill },
     margins: { top: 0, bottom: 0, left: 0, right: 0 } as any,
     children: [
       new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: STYLE.spacing.none,
-        children: [new TextRun({ text: label, size: 20, bold: true, color: "111111" })],
+        children: [new ImageRun({ data: bytes, transformation: { width: box, height: box } })],
       }),
     ],
   });
@@ -2003,7 +1976,19 @@ async function optimizeImageBytesForDocx(
   bytes: Uint8Array,
   opts: { maxWidth: number; maxHeight: number; quality?: number }
 ): Promise<Uint8Array> {
-  return bytes;
+  try {
+    const img = sharp(Buffer.from(bytes), { density: 144, pages: 1 });
+    const meta = await img.metadata();
+    const srcW = Math.max(1, meta.width || opts.maxWidth);
+    const srcH = Math.max(1, meta.height || opts.maxHeight);
+    const scale = Math.min(1, opts.maxWidth / srcW, opts.maxHeight / srcH);
+    const outW = Math.max(1, Math.round(srcW * scale));
+    const outH = Math.max(1, Math.round(srcH * scale));
+    const out = await img.resize(outW, outH, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: Math.round((opts.quality ?? 0.76) * 100) }).toBuffer();
+    return new Uint8Array(out);
+  } catch {
+    return bytes;
+  }
 }
 
 async function resolvePhotoBytesForDocx(
@@ -2080,7 +2065,9 @@ async function getBucketNamesOnce(supabase: any): Promise<string[]> {
 
 async function blobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
   try {
-    return new Uint8Array(await blob.arrayBuffer());
+    const buf = Buffer.from(await blob.arrayBuffer());
+    const out = await sharp(buf, { density: 144, pages: 1 }).png().toBuffer();
+    return new Uint8Array(out);
   } catch {
     return null;
   }
@@ -2093,7 +2080,13 @@ async function getPdfJsForDocx() {
 }
 
 async function pdfBlobToPngBytes(blob: Blob): Promise<Uint8Array | null> {
-  return null;
+  try {
+    const buf = Buffer.from(await blob.arrayBuffer());
+    const out = await sharp(buf, { density: 144, pages: 1 }).png().toBuffer();
+    return new Uint8Array(out);
+  } catch {
+    return null;
+  }
 }
 
 async function fetchBytes(url: string, timeoutMs = DEFAULT_PHOTO_TIMEOUT_MS) {
@@ -4291,6 +4284,46 @@ export async function downloadProjectsCSV(
 }
 
 
+
+async function ensureRouteIdForMissingReportsOnServer(
+  supabase: any,
+  projectId: string,
+  reportIds: string[]
+) {
+  if (!projectId || !reportIds.length) return;
+
+  const { data: reports, error: rErr } = await supabase
+    .from("reports")
+    .select("id, route_id")
+    .in("id", reportIds);
+  if (rErr) throw rErr;
+
+  const missingIds = (reports || [])
+    .filter((r: any) => !r?.route_id)
+    .map((r: any) => String(r.id))
+    .filter(Boolean);
+
+  if (!missingIds.length) return;
+
+  const { data: latestRoute, error: routeErr } = await supabase
+    .from("routes")
+    .select("id")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (routeErr) throw routeErr;
+
+  const routeId = latestRoute?.id;
+  if (!routeId) return;
+
+  const { error: updErr } = await supabase
+    .from("reports")
+    .update({ route_id: routeId })
+    .in("id", missingIds);
+  if (updErr) throw updErr;
+}
+
 export async function generateProjectDOCX(
   supabase: any,
   projectId: string,
@@ -4312,10 +4345,20 @@ export async function generateProjectDOCX(
     .order("created_at", { ascending: true });
   if (rErr) throw rErr;
 
+  const allReportIds = ((reports || []) as ReportRow[]).map((r) => String(r.id)).filter(Boolean);
+  await ensureRouteIdForMissingReportsOnServer(supabase, projectId, allReportIds);
+
   const collected: any[] = [];
 
   for (const r of (reports || []) as ReportRow[]) {
-    const { points } = await getPointsForReport(supabase, r.id);
+    let loaded: any = null;
+    try {
+      loaded = await getPointsForReport(supabase, r.id);
+    } catch {
+      continue;
+    }
+
+    const { points } = loaded || {};
     if (!Array.isArray(points) || !points.length) continue;
 
     const reportPoints = points.map((pt: any, idx: number) => ({
@@ -4384,10 +4427,19 @@ export async function generateProjectDOCXByReportIds(
     .single();
   if (pErr) throw pErr;
 
+  await ensureRouteIdForMissingReportsOnServer(supabase, projectId, reportIds);
+
   const collected: any[] = [];
 
   for (const reportId of reportIds) {
-    const { points, report } = await getPointsForReport(supabase, reportId);
+    let loaded: any = null;
+    try {
+      loaded = await getPointsForReport(supabase, reportId);
+    } catch {
+      continue;
+    }
+
+    const { points, report } = loaded || {};
     if (!Array.isArray(points) || !points.length) continue;
 
     const reportPoints = points.map((pt: any, idx: number) => ({
@@ -4445,7 +4497,14 @@ export async function generateProjectDOCXByReportIds(
  * EXPORTED GPX
  * ========================= */
 async function collectGpxPointsForReportId(supabase: any, reportId: string): Promise<GPXPoint[]> {
-  const { points, report } = await getPointsForReport(supabase, reportId);
+  let loaded: any = null;
+  try {
+    loaded = await getPointsForReport(supabase, reportId);
+  } catch {
+    return [];
+  }
+
+  const { points, report } = loaded || {};
   const norm = enrichPointsAlways(points || []);
 
   const out: GPXPoint[] = [];
@@ -4484,6 +4543,8 @@ export async function generateProjectGPXByReportIds(
 ): Promise<{ blob: Blob; fileName: string }> {
   const { data: project } = await supabase.from("projects").select("*").eq("id", projectId).single();
   const baseName = opts.name || projectNameOf(project as any);
+
+  await ensureRouteIdForMissingReportsOnServer(supabase, projectId, reportIds);
 
   const points: GPXPoint[] = [];
   for (const rid of reportIds) {
